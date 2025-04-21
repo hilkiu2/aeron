@@ -19,11 +19,14 @@ import io.aeron.Aeron;
 
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.cluster.client.ClusterException;
+import io.aeron.cluster.client.EgressListener;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 
 import io.aeron.CommonContext;
 
@@ -35,6 +38,88 @@ import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.net.URLDecoder;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+
+// /**
+//  * HTTP server that connects to a running Aeron cluster and submits auction commands.
+//  */
+// public class AuctionHttpServer
+// {
+//     private static final int MAX_MESSAGE_LENGTH = 1024;
+//     private static final AtomicReference<AeronCluster> clusterRef = new AtomicReference<>();
+
+//     private static final AtomicLong correlationId = new AtomicLong();
+//     private static final int CORRELATION_ID_OFFSET = 0;
+//     private static final int CUSTOMER_ID_OFFSET = CORRELATION_ID_OFFSET + Long.BYTES;
+//     private static final int PRICE_OFFSET = CUSTOMER_ID_OFFSET + Long.BYTES;
+//     private static final int BID_SUCCEEDED_OFFSET = PRICE_OFFSET + Long.BYTES;
+//     private static final int EGRESS_MESSAGE_LENGTH = BID_SUCCEEDED_OFFSET + Byte.BYTES;
+
+//     private static volatile long latestCustomerId = -1;
+//     private static volatile long latestPrice = -1;
+
+//     public static void main(final String[] args)
+//     {
+//         port(8080);
+//         final String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+//         System.out.println("Auction REST server starting on port 8080 (" + time + ") ...");
+
+//         final String hostname = InetAddress.getLocalHost().getHostName(); // "node1.aeron-jepsen.cs598fts.emulab.net"
+//         final String nodeId = "1"; // fallback
+//         if (hostname.matches(".*node(\\d+).*")) {
+//             nodeId = hostname.replaceAll(".*node(\\d+).*", "$1");
+//         }
+//         final String aeronDir = CommonContext.getAeronDirectoryName() + "-" + nodeId + "-driver";
+//         System.out.println("Aeron directory: " + aeronDir);
+//         System.out.println("Node ID: " + nodeId);
+
+//         final EgressListener listener = (clusterSessionId, timestamp, buffer, offset, length, header) ->
+//         {
+//             if (length >= EGRESS_MESSAGE_LENGTH)
+//             {
+//                 final long corrId = buffer.getLong(offset + CORRELATION_ID_OFFSET);
+//                 final long customerId = buffer.getLong(offset + CUSTOMER_ID_OFFSET);
+//                 final long price = buffer.getLong(offset + PRICE_OFFSET);
+//                 final byte succeeded = buffer.getByte(offset + BID_SUCCEEDED_OFFSET);
+
+//                 latestCustomerId = customerId;
+//                 latestPrice = price;
+
+//                 System.out.printf("Cluster Response (corr=%d): customerId=%d, price=%d, success=%s%n",
+//                     corrId, customerId, price, succeeded == 1);
+//             }
+//             else
+//             {
+//                 System.out.println("Received egress with unexpected length: " + length);
+//             }
+//         };
+
+//         // Connect to Aeron Cluster
+//         final AeronCluster.Context clusterContext = new AeronCluster.Context()
+//             .egressListener((clusterSessionId, timestamp, buffer, offset, length, header) ->
+//             {
+//                 // Optionally handle cluster replies here
+//             })
+//             .ingressChannel("aeron:udp?term-length=64k")
+//             .egressChannel("aeron:udp?term-length=64k|endpoint=localhost:0")
+//             .aeronDirectoryName(aeronDir)
+//             .ingressEndpoints("0=localhost:9002,1=localhost:9102,2=localhost:9202");
+
+//         try
+//         {
+//             final AeronCluster cluster = AeronCluster.connect(clusterContext);
+//             clusterRef.set(cluster);
+//             System.out.println("Connected to Aeron Cluster.");
+//         }
+//         catch (ClusterException e)
+//         {
+//             System.err.println("Failed to connect to Aeron Cluster:");
+//             e.printStackTrace();
+//             System.exit(1);
+//         }
+//     }
+// }
 
 /**
  * HTTP server that connects to a running Aeron cluster and submits auction commands.
@@ -44,44 +129,69 @@ public class AuctionHttpServer
     private static final int MAX_MESSAGE_LENGTH = 1024;
     private static final AtomicReference<AeronCluster> clusterRef = new AtomicReference<>();
 
+    private static final AtomicLong correlationId = new AtomicLong();
+    private static final int CORRELATION_ID_OFFSET = 0;
+    private static final int CUSTOMER_ID_OFFSET = CORRELATION_ID_OFFSET + Long.BYTES;
+    private static final int PRICE_OFFSET = CUSTOMER_ID_OFFSET + Long.BYTES;
+    private static final int BID_SUCCEEDED_OFFSET = PRICE_OFFSET + Long.BYTES;
+    private static final int EGRESS_MESSAGE_LENGTH = BID_SUCCEEDED_OFFSET + Byte.BYTES;
+
+    private static volatile long latestCustomerId = -1;
+    private static volatile long latestPrice = 0;
+
     public static void main(final String[] args)
     {
         port(8080);
-        String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        final String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
         System.out.println("Auction REST server starting on port 8080 (" + time + ") ...");
 
-        exception(Exception.class, (e, req, res) -> {
-            System.err.println("Exception during request:");
+        String hostname = "unknown";
+        try {
+            hostname = InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException e) {
+            System.err.println("Failed to resolve local hostname:");
             e.printStackTrace();
-        });
+        }
+        String nodeId = "1";
+        if (hostname.matches(".*node(\\d+).*"))
+        {
+            nodeId = hostname.replaceAll(".*node(\\d+).*", "$1");
+        }
+        final String aeronDir = CommonContext.getAeronDirectoryName() + "-" + nodeId + "-driver";
+        System.out.println("Aeron directory: " + aeronDir);
+        System.out.println("Node ID: " + nodeId);
 
-        get("/health", (req, res) -> {
-            System.out.println("...get/health body = " + req.body());
-
-            AeronCluster cluster = clusterRef.get();
-            if (cluster != null && !cluster.isClosed()) {
-                return "{\"status\": \"connected\"}";
-            } else {
-                res.status(503);
-                return "{\"status\": \"not connected\"}";
-            }
-        });
-
-
-        // Connect to Aeron Cluster
-        final AeronCluster.Context clusterContext = new AeronCluster.Context()
-            .egressListener((clusterSessionId, timestamp, buffer, offset, length, header) ->
+        final EgressListener listener = (clusterSessionId, timestamp, buffer, offset, length, header) ->
+        {
+            if (length >= EGRESS_MESSAGE_LENGTH)
             {
-                // Optionally handle cluster replies here
-            })
-            .ingressChannel("aeron:udp?term-length=64k")
-            .egressChannel("aeron:udp?term-length=64k|endpoint=localhost:0")
-            .aeronDirectoryName(CommonContext.getAeronDirectoryName() + "-0-driver")
-            .ingressEndpoints("0=localhost:9002,1=localhost:9102,2=localhost:9202");
+                final long corrId = buffer.getLong(offset + CORRELATION_ID_OFFSET);
+                final long customerId = buffer.getLong(offset + CUSTOMER_ID_OFFSET);
+                final long price = buffer.getLong(offset + PRICE_OFFSET);
+                final byte succeeded = buffer.getByte(offset + BID_SUCCEEDED_OFFSET);
+
+                latestCustomerId = customerId;
+                latestPrice = price;
+
+                System.out.printf("Cluster Response (corr=%d): customerId=%d, price=%d, success=%s%n",
+                    corrId, customerId, price, succeeded == 1);
+            }
+            else
+            {
+                System.out.println("Received egress with unexpected length: " + length);
+            }
+        };
 
         try
         {
-            final AeronCluster cluster = AeronCluster.connect(clusterContext);
+            final AeronCluster cluster = AeronCluster.connect(
+                new AeronCluster.Context()
+                .egressListener(listener)
+                .ingressChannel("aeron:udp?term-length=64k")
+                .egressChannel("aeron:udp?term-length=64k|endpoint=localhost:0")
+                .aeronDirectoryName(aeronDir)
+                .ingressEndpoints("0=localhost:9002,1=localhost:9102,2=localhost:9202")
+            );
             clusterRef.set(cluster);
             System.out.println("Connected to Aeron Cluster.");
         }
@@ -92,108 +202,61 @@ public class AuctionHttpServer
             System.exit(1);
         }
 
-        post("/auction", (req, res) ->
-        {
-            System.out.println("...post/auction body = " + req.body());
-
-            String item = req.queryParams("item");
-            if (item == null) {
-                Map<String, String> formParams = parseFormBody(req.body());
-                item = formParams.get("item");
-            }
-            
-            if (item == null) {
-                res.status(400);
-                return "{\"error\": \"Missing 'item'\"}";
-            }
-
-            final String message = "CREATE:" + item;
-            res.type("application/json");
-            return sendMessage(clusterRef.get(), message);
-        });
-
         post("/auction/bid", (req, res) ->
         {
-            System.out.println("...post/auction/bid body = " + req.body());
-            
-            String id = req.queryParams("id");
-            String amount = req.queryParams("amount");
+            System.out.printf("...post/auction/bid customerId=%s, price=%s%n", req.queryParams("customerId"), req.queryParams("price"));
 
-            if (id == null || amount == null) {
-                Map<String, String> formParams = parseFormBody(req.body());
-                if (id == null) id = formParams.get("id");
-                if (amount == null) amount = formParams.get("amount");
-            }
+            final String customerIdStr = req.queryParams("customerId");
+            final String priceStr = req.queryParams("price");
 
-            if (id == null || amount == null)
+            if (customerIdStr == null || priceStr == null)
             {
                 res.status(400);
-                return "{\"error\": \"Missing 'id' or 'amount'\"}";
+                return "{\"error\": \"Missing 'customerId' or 'price' parameter\"}";
             }
 
-            final String message = "BID:" + id + ":" + amount;
-            res.type("application/json");
-            return sendMessage(clusterRef.get(), message);
-        });
-
-        post("/auction/close", (req, res) ->
-        {
-            System.out.println("...post/auction/close body = " + req.body());
-
-            String id = req.queryParams("id");
-            if (id == null) {
-                Map<String, String> formParams = parseFormBody(req.body());
-                id = formParams.get("id");
-            }
-
-            if (id == null)
+            final long cid, price;
+            try
+            {
+                cid = Long.parseLong(customerIdStr);
+                price = Long.parseLong(priceStr);
+            } catch (NumberFormatException ex)
             {
                 res.status(400);
-                return "{\"error\": \"Missing 'id'\"}";
+                return "{\"error\": \"Invalid 'customerId' or 'price' format\"}";
             }
 
-            final String message = "CLOSE:" + id;
-            res.type("application/json");
-            return sendMessage(clusterRef.get(), message);
-        });
-    }
+            final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES);
+            buffer.putLong(CORRELATION_ID_OFFSET, correlationId.incrementAndGet());
+            buffer.putLong(CUSTOMER_ID_OFFSET, cid);
+            buffer.putLong(PRICE_OFFSET, price);
+            final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
 
-    private static Map<String, String> parseFormBody(String body) {
-        Map<String, String> formParams = new HashMap<>();
-        if (body != null && !body.isEmpty()) {
-            for (String pair : body.split("&")) {
-                String[] parts = pair.split("=", 2);
-                if (parts.length == 2) {
-                    formParams.put(java.net.URLDecoder.decode(parts[0], StandardCharsets.UTF_8),
-                                java.net.URLDecoder.decode(parts[1], StandardCharsets.UTF_8));
+            int attempts = 0;
+            System.out.printf("Sending bid: cid=%d, price=%d, correlationId=%d%n", cid, price, correlationId.get());
+            while (clusterRef.get().offer(aeronBuffer, 0, buffer.capacity()) < 0)
+            {
+                if (++attempts > 1000)
+                {
+                    System.err.println("Failed to send bid to Aeron.");
+                    res.status(500);
+                    return "{\"error\": \"Failed to deliver bid to cluster\"}";
                 }
+                Thread.yield();
             }
-        }
-        return formParams;
-    }
 
+            return "{\"status\": \"OK\"}";
+        });
 
-    private static String sendMessage(final AeronCluster cluster, final String message)
-    {
-        System.out.println("...sending message " + message);
-        final byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > MAX_MESSAGE_LENGTH)
+        get("/auction/state", (req, res) -> 
         {
-            return "{\"error\": \"Message too large\"}";
-        }
+            res.type("application/json");
+            return String.format("{\"price\": %d, \"customerId\": %d}", latestPrice, latestCustomerId);
+        });
 
-        final DirectBuffer buffer = new UnsafeBuffer(bytes);
-        int attempts = 0;
-        while (cluster.offer(buffer, 0, bytes.length) < 0)
+        get("/health", (req, res) -> 
         {
-            attempts++;
-            if (attempts > 1000) {
-                System.err.println("Failed to send message to Aeron cluster: " + message);
-                return "{\"error\": \"Failed to deliver to Aeron\"}";
-            }
-            Thread.yield(); // Retry until successful
-        }
-
-        return "{\"status\": \"OK\"}";
+            return clusterRef.get() != null && !clusterRef.get().isClosed() ? "{\"status\": \"OK\"}" : "{\"status\": \"ERROR\"}";
+        });
     }
 }

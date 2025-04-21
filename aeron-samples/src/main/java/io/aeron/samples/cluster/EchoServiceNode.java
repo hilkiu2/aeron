@@ -18,7 +18,6 @@ package io.aeron.samples.cluster;
 import io.aeron.cluster.ClusteredMediaDriver;
 import io.aeron.cluster.service.ClusteredServiceContainer;
 import io.aeron.samples.cluster.tutorial.BasicAuctionClusteredService;
-import io.aeron.samples.cluster.KV.KVClusteredService;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.ShutdownSignalBarrier;
 
@@ -57,11 +56,6 @@ public final class EchoServiceNode
             "aeron.cluster.tutorial.hostnames", "localhost,localhost,localhost");
         final String internalHostnamesStr = System.getProperty(
             "aeron.cluster.tutorial.hostnames.internal", hostnamesStr);
-        // final int nodeId = parseInt(System.getProperty("aeron.cluster.KV.nodeId"));
-        // final String hostnamesStr = System.getProperty(
-        //     "aeron.cluster.KV.hostnames", "localhost,localhost,localhost");
-        // final String internalHostnamesStr = System.getProperty(
-        //     "aeron.cluster.KV.hostnames.internal", hostnamesStr);
 
         final List<String> hostnames = Arrays.asList(hostnamesStr.split(","));
         final List<String> internalHostnames = Arrays.asList(internalHostnamesStr.split(","));
