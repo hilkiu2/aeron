@@ -1114,11 +1114,31 @@ project(':aeron-agent') {
 project(':aeron-samples') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
+    apply plugin: 'application'
 
     dependencies {
+        implementation 'com.sparkjava:spark-core:2.9.4'
+        implementation project(':aeron-cluster')
         api project(':aeron-cluster')
         implementation libs.hdrHistogram
         testImplementation project(':aeron-test-support')
+    }
+
+    checkstyle {
+        ignoreFailures = true
+    }
+
+    application {
+        mainClass.set('io.aeron.samples.cluster.tutorial.AuctionHttpServer')
+        // mainClass.set('io.aeron.samples.cluster.KV.AuctionHttpServer')
+        // mainClass.set("io.aeron.samples.cluster.KV.SingleNodeCluster")
+    }
+
+    tasks.named('run').configure {
+        jvmArgs += [
+            "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+            "--add-opens=java.base/java.nio=ALL-UNNAMED"
+        ]
     }
 
     java {
