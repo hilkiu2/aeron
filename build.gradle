@@ -1122,6 +1122,7 @@ project(':aeron-samples') {
         api project(':aeron-cluster')
         implementation libs.hdrHistogram
         testImplementation project(':aeron-test-support')
+        implementation 'com.google.code.gson:gson:2.10.1'
     }
 
     checkstyle {
@@ -1130,8 +1131,6 @@ project(':aeron-samples') {
 
     application {
         mainClass.set('io.aeron.samples.cluster.tutorial.AuctionHttpServer')
-        // mainClass.set('io.aeron.samples.cluster.KV.AuctionHttpServer')
-        // mainClass.set("io.aeron.samples.cluster.KV.SingleNodeCluster")
     }
 
     tasks.named('run').configure {

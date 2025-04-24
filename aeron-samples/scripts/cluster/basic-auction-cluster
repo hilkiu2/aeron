@@ -22,8 +22,8 @@ mkdir -p logs
 # tag::start_jvm[]
 function startNode() {
     ${JAVA_HOME}/bin/java \
-        -cp ../../../aeron-all/build/libs/aeron-all-${VERSION}.jar \
-        -javaagent:../../../aeron-agent/build/libs/aeron-agent-${VERSION}.jar \
+        -cp /users/hilkiu2/aeron/libs/aeron-all-${VERSION}.jar \
+        -javaagent:/users/hilkiu2/aeron/libs/aeron-agent-${VERSION}.jar \
         -XX:+UseBiasedLocking \
         -XX:BiasedLockingStartupDelay=0 \
         -XX:+UnlockExperimentalVMOptions \
