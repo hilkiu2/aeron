@@ -37,10 +37,10 @@ import java.util.List;
 import static java.lang.Integer.parseInt;
 
 /**
- * Node that launches the service for the {@link BasicAuctionClusteredService}.
+ * Node that launches the service for the {@link BasicKVClusteredService}.
  */
 // tag::new_service[]
-public class BasicAuctionClusteredServiceNode
+public class BasicKVClusteredServiceNode
 // end::new_service[]
 {
     private static ErrorHandler errorHandler(final String context)
@@ -146,7 +146,7 @@ public class BasicAuctionClusteredServiceNode
             .termBufferSparseFile(true)
             .multicastFlowControlSupplier(new MinMulticastFlowControlSupplier())
             .terminationHook(barrier::signal)
-            .errorHandler(BasicAuctionClusteredServiceNode.errorHandler("Media Driver"));
+            .errorHandler(BasicKVClusteredServiceNode.errorHandler("Media Driver"));
         // end::media_driver[]
 
         final AeronArchive.Context replicationArchiveContext = new AeronArchive.Context()
@@ -189,7 +189,7 @@ public class BasicAuctionClusteredServiceNode
             .aeronDirectoryName(aeronDirName)                                                            // <1>
             .archiveContext(aeronArchiveContext.clone())                                                 // <2>
             .clusterDir(new File(baseDir, "cluster"))
-            .clusteredService(new BasicAuctionClusteredService())                                        // <3>
+            .clusteredService(new BasicKVClusteredService())                                        // <3>
             .errorHandler(errorHandler("Clustered Service"));
         // end::clustered_service[]
 

@@ -35,7 +35,7 @@ function startNode() {
         -Daeron.event.cluster.log.disable=CANVASS_POSITION,APPEND_POSITION,COMMIT_POSITION \
         -Daeron.cluster.tutorial.nodeId=${1} \
         ${JVM_OPTS} ${ADD_OPENS} \
-        io.aeron.samples.cluster.tutorial.BasicKVServiceNode > logs/cluster-${1}.log &
+        io.aeron.samples.cluster.tutorial.BasicKVClusteredServiceNode > logs/cluster-${1}.log &
 }
 
 function startAll() {

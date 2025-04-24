@@ -17,7 +17,7 @@ package io.aeron.samples.cluster;
 
 import io.aeron.cluster.ClusteredMediaDriver;
 import io.aeron.cluster.service.ClusteredServiceContainer;
-import io.aeron.samples.cluster.tutorial.BasicAuctionClusteredService;
+import io.aeron.samples.cluster.tutorial.BasicKVClusteredService;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.ShutdownSignalBarrier;
 
@@ -27,7 +27,7 @@ import java.util.List;
 import static java.lang.Integer.parseInt;
 
 /**
- * Node that launches the service for the {@link BasicAuctionClusteredService}.
+ * Node that launches the service for the {@link BasicKVClusteredService}.
  */
 public final class EchoServiceNode
 {
