@@ -1130,7 +1130,7 @@ project(':aeron-samples') {
     }
 
     application {
-        mainClass.set('io.aeron.samples.cluster.tutorial.AuctionHttpServer')
+        mainClass.set('io.aeron.samples.cluster.tutorial.KVHttpServer')
     }
 
     tasks.named('run').configure {

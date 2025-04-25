@@ -120,19 +120,19 @@ public class BasicKVClusterClient implements EgressListener
     // tag::publish[]
     private long sendPut(final AeronCluster aeronCluster, final String key, final String value)
     {
-        final long correlationId = nextCorrelationId++;
+        final long corrId = nextCorrelationId++;
 
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         byte[] valBytes = value.getBytes(StandardCharsets.UTF_8);
 
-        int messageLength = HEADER_LENGTH + keyBytes.length + valBytes.length;
+        int messageLength = HEADER_LENGTH_PUT + keyBytes.length + valBytes.length;
 
-        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, correlationId);
+        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
         actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_PUT);
         actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
         actionBidBuffer.putInt(VALUE_LENGTH_OFFSET, valBytes.length);
-        actionBidBuffer.putBytes(HEADER_LENGTH, keyBytes);
-        actionBidBuffer.putBytes(HEADER_LENGTH + keyBytes.length, valBytes);
+        actionBidBuffer.putBytes(HEADER_LENGTH_PUT, keyBytes);
+        actionBidBuffer.putBytes(HEADER_LENGTH_PUT + keyBytes.length, valBytes);
 
         idleStrategy.reset();
         while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
@@ -140,21 +140,20 @@ public class BasicKVClusterClient implements EgressListener
             idleStrategy.idle(aeronCluster.pollEgress());
         }
 
-        return correlationId;
+        return corrId;
     }
 
     private long sendGet(final AeronCluster aeronCluster, final String key)
     {
-        final long correlationId = nextCorrelationId++;
+        final long corrId = nextCorrelationId++;
 
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-        int messageLength = HEADER_LENGTH + keyBytes.length;
+        int messageLength = HEADER_LENGTH_GET + keyBytes.length;
 
-        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, correlationId);
+        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
         actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_GET);
         actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
-        actionBidBuffer.putInt(VALUE_LENGTH_OFFSET, 0);
-        actionBidBuffer.putBytes(HEADER_LENGTH, keyBytes);
+        actionBidBuffer.putBytes(HEADER_LENGTH_GET, keyBytes);
 
         idleStrategy.reset();
         while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
@@ -162,7 +161,7 @@ public class BasicKVClusterClient implements EgressListener
             idleStrategy.idle(aeronCluster.pollEgress());
         }
 
-        return correlationId;
+        return corrId;
     }
 
     private long sendCAS(
@@ -171,38 +170,28 @@ public class BasicKVClusterClient implements EgressListener
         final String expectedValue,
         final String newValue)
     {
-        final long correlationId = nextCorrelationId++;
+        final long corrId = nextCorrelationId++;
 
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         byte[] expectedBytes = expectedValue.getBytes(StandardCharsets.UTF_8);
         byte[] newBytes = newValue.getBytes(StandardCharsets.UTF_8);
 
-        int headerSize = Long.BYTES + Byte.BYTES + 3 * Integer.BYTES;
-        int messageLength = headerSize + keyBytes.length + expectedBytes.length + newBytes.length;
+        int messageLength = HEADER_LENGTH_CAS + keyBytes.length + expectedBytes.length + newBytes.length;
 
-        int offset = 0;
-        actionBidBuffer.putLong(offset, correlationId);
-        offset += Long.BYTES;
+        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
+        actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_CAS);
+        actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
+        actionBidBuffer.putInt(EXPECTED_LENGTH_OFFSET, expectedBytes.length);
+        actionBidBuffer.putInt(NEW_LENGTH_OFFSET, newBytes.length);
 
-        actionBidBuffer.putByte(offset, OPCODE_CAS);
-        offset += Byte.BYTES;
+        int payloadOffset = HEADER_LENGTH_CAS;
+        actionBidBuffer.putBytes(payloadOffset, keyBytes);
+        payloadOffset += keyBytes.length;
 
-        actionBidBuffer.putInt(offset, keyBytes.length);
-        offset += Integer.BYTES;
+        actionBidBuffer.putBytes(payloadOffset, expectedBytes);
+        payloadOffset += expectedBytes.length;
 
-        actionBidBuffer.putInt(offset, expectedBytes.length);
-        offset += Integer.BYTES;
-
-        actionBidBuffer.putInt(offset, newBytes.length);
-        offset += Integer.BYTES;
-
-        actionBidBuffer.putBytes(offset, keyBytes);
-        offset += keyBytes.length;
-
-        actionBidBuffer.putBytes(offset, expectedBytes);
-        offset += expectedBytes.length;
-
-        actionBidBuffer.putBytes(offset, newBytes);
+        actionBidBuffer.putBytes(payloadOffset, newBytes);
 
         idleStrategy.reset();
         while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
@@ -210,30 +199,29 @@ public class BasicKVClusterClient implements EgressListener
             idleStrategy.idle(aeronCluster.pollEgress());
         }
 
-        return correlationId;
+        return corrId;
     }
 
-    // private long sendDelete(final AeronCluster aeronCluster, final String key)
-    // {
-    //     final long correlationId = nextCorrelationId++;
+    private long sendDelete(final AeronCluster aeronCluster, final String key)
+    {
+        final long corrId = nextCorrelationId++;
 
-    //     byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-    //     int messageLength = HEADER_LENGTH + keyBytes.length;
+        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+        int messageLength = HEADER_LENGTH_GET + keyBytes.length;
 
-    //     actionBidBuffer.putLong(CORRELATION_ID_OFFSET, correlationId);
-    //     actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_DELETE);
-    //     actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
-    //     actionBidBuffer.putInt(VALUE_LENGTH_OFFSET, 0); // No value for delete
-    //     actionBidBuffer.putBytes(HEADER_LENGTH, keyBytes);
+        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
+        actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_DELETE);
+        actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
+        actionBidBuffer.putBytes(HEADER_LENGTH_GET, keyBytes);
 
-    //     idleStrategy.reset();
-    //     while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
-    //     {
-    //         idleStrategy.idle(aeronCluster.pollEgress());
-    //     }
+        idleStrategy.reset();
+        while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
+        {
+            idleStrategy.idle(aeronCluster.pollEgress());
+        }
 
-    //     return correlationId;
-    // }
+        return corrId;
+    }
     // end::publish[]
 
     public void runTest(final AeronCluster cluster)

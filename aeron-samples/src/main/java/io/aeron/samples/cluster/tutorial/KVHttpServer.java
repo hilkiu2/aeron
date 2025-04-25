@@ -81,7 +81,9 @@ public class KVHttpServer implements EgressListener
     private final MutableDirectBuffer actionBidBuffer = new ExpandableArrayBuffer();
     private final IdleStrategy idleStrategy = new BackoffIdleStrategy();
     
-    private final Map<Long, CompletableFuture<Boolean>> pendingResponses = new ConcurrentHashMap<>();
+    private final Map<Long, CompletableFuture<String>> stringResponses = new ConcurrentHashMap<>();
+    private final Map<Long, CompletableFuture<Boolean>> boolResponses = new ConcurrentHashMap<>();
+
     private static final AtomicLong correlationId = new AtomicLong();
 
     /**
@@ -104,27 +106,31 @@ public class KVHttpServer implements EgressListener
         final long correlationId = buffer.getLong(offset + CORRELATION_ID_OFFSET);
         final byte status = buffer.getByte(offset + CORRELATION_ID_OFFSET + Long.BYTES);
 
-        System.out.print("OnMessage: { Cluster Session Id: " + clusterSessionId + ", Correlation Id: " + correlationId + ", Status(0: fail, 1: success): " + status);
-
-        final CompletableFuture<?> future = pendingResponses.remove(correlationId);
-        if (future == null) {
-            System.err.println("No pending future found for correlationId: " + correlationId + " }");
-            return;
-        }
+        System.out.print("OnMessage: { Cluster Session Id: " + clusterSessionId + ", Correlation Id: " + correlationId + ", Status: " + status);
 
         if (length > Long.BYTES + 1) {
+            final CompletableFuture<String> future = stringResponses.remove(correlationId);
+            if (future == null) {
+                System.err.println("No pending GET future found for correlationId: " + correlationId + " }");
+                return;
+            }
+
             int valLen = buffer.getInt(offset + CORRELATION_ID_OFFSET + Long.BYTES + 1);
             byte[] valBytes = new byte[valLen];
             buffer.getBytes(offset + CORRELATION_ID_OFFSET + Long.BYTES + 1 + Integer.BYTES, valBytes);
             String value = new String(valBytes, StandardCharsets.UTF_8);
             System.out.println(", Value: " + value + " }");
 
-            CompletableFuture<String> stringFuture = (CompletableFuture<String>) future;
-            stringFuture.complete(value);
+            future.complete(value);
         } else {
+            final CompletableFuture<Boolean> future = boolResponses.remove(correlationId);
+            if (future == null) {
+                System.err.println("No pending BOOL future found for correlationId: " + correlationId + " }");
+                return;
+            }
+
             System.out.println(" }");
-            CompletableFuture<Boolean> boolFuture = (CompletableFuture<Boolean>) future;
-            boolFuture.complete(status == 1);
+            future.complete(status == 1);
         }
     }
 
@@ -190,14 +196,14 @@ public class KVHttpServer implements EgressListener
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         byte[] valBytes = value.getBytes(StandardCharsets.UTF_8);
 
-        int messageLength = HEADER_LENGTH + keyBytes.length + valBytes.length;
+        int messageLength = HEADER_LENGTH_PUT + keyBytes.length + valBytes.length;
 
         actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
         actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_PUT);
         actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
         actionBidBuffer.putInt(VALUE_LENGTH_OFFSET, valBytes.length);
-        actionBidBuffer.putBytes(HEADER_LENGTH, keyBytes);
-        actionBidBuffer.putBytes(HEADER_LENGTH + keyBytes.length, valBytes);
+        actionBidBuffer.putBytes(HEADER_LENGTH_PUT, keyBytes);
+        actionBidBuffer.putBytes(HEADER_LENGTH_PUT + keyBytes.length, valBytes);
 
         idleStrategy.reset();
         while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
@@ -213,13 +219,12 @@ public class KVHttpServer implements EgressListener
         final long corrId = correlationId.getAndIncrement();
 
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-        int messageLength = HEADER_LENGTH + keyBytes.length;
+        int messageLength = HEADER_LENGTH_GET + keyBytes.length;
 
         actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
         actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_GET);
         actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
-        actionBidBuffer.putInt(VALUE_LENGTH_OFFSET, 0);
-        actionBidBuffer.putBytes(HEADER_LENGTH, keyBytes);
+        actionBidBuffer.putBytes(HEADER_LENGTH_GET, keyBytes);
 
         idleStrategy.reset();
         while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
@@ -242,32 +247,22 @@ public class KVHttpServer implements EgressListener
         byte[] expectedBytes = expectedValue.getBytes(StandardCharsets.UTF_8);
         byte[] newBytes = newValue.getBytes(StandardCharsets.UTF_8);
 
-        int headerSize = Long.BYTES + Byte.BYTES + 3 * Integer.BYTES;
-        int messageLength = headerSize + keyBytes.length + expectedBytes.length + newBytes.length;
+        int messageLength = HEADER_LENGTH_CAS + keyBytes.length + expectedBytes.length + newBytes.length;
 
-        int offset = 0;
-        actionBidBuffer.putLong(offset, corrId);
-        offset += Long.BYTES;
+        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
+        actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_CAS);
+        actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
+        actionBidBuffer.putInt(EXPECTED_LENGTH_OFFSET, expectedBytes.length);
+        actionBidBuffer.putInt(NEW_LENGTH_OFFSET, newBytes.length);
 
-        actionBidBuffer.putByte(offset, OPCODE_CAS);
-        offset += Byte.BYTES;
+        int payloadOffset = HEADER_LENGTH_CAS;
+        actionBidBuffer.putBytes(payloadOffset, keyBytes);
+        payloadOffset += keyBytes.length;
 
-        actionBidBuffer.putInt(offset, keyBytes.length);
-        offset += Integer.BYTES;
+        actionBidBuffer.putBytes(payloadOffset, expectedBytes);
+        payloadOffset += expectedBytes.length;
 
-        actionBidBuffer.putInt(offset, expectedBytes.length);
-        offset += Integer.BYTES;
-
-        actionBidBuffer.putInt(offset, newBytes.length);
-        offset += Integer.BYTES;
-
-        actionBidBuffer.putBytes(offset, keyBytes);
-        offset += keyBytes.length;
-
-        actionBidBuffer.putBytes(offset, expectedBytes);
-        offset += expectedBytes.length;
-
-        actionBidBuffer.putBytes(offset, newBytes);
+        actionBidBuffer.putBytes(payloadOffset, newBytes);
 
         idleStrategy.reset();
         while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
@@ -278,28 +273,26 @@ public class KVHttpServer implements EgressListener
         return corrId;
     }
 
-    // private long sendDelete(final AeronCluster aeronCluster, final String key)
-    // {
-    //     final long corrId = correlationId.getAndIncrement();
+    private long sendDelete(final AeronCluster aeronCluster, final String key)
+    {
+        final long corrId = correlationId.getAndIncrement();
 
-    //     byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-    //     int messageLength = HEADER_LENGTH + keyBytes.length;
+        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+        int messageLength = HEADER_LENGTH_GET + keyBytes.length;
 
-    //     actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
-    //     actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_DELETE);
-    //     actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
-    //     actionBidBuffer.putInt(VALUE_LENGTH_OFFSET, 0); // No value for delete
-    //     actionBidBuffer.putBytes(HEADER_LENGTH, keyBytes);
+        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
+        actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_DELETE);
+        actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
+        actionBidBuffer.putBytes(HEADER_LENGTH_GET, keyBytes);
 
-    //     idleStrategy.reset();
-    //     while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
-    //     {
-    //         idleStrategy.idle(aeronCluster.pollEgress());
-    //     }
+        idleStrategy.reset();
+        while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
+        {
+            idleStrategy.idle(aeronCluster.pollEgress());
+        }
 
-    //     return corrId;
-    // }
-
+        return corrId;
+    }
 
     public void startHttpServer() {
         port(8081);
@@ -317,12 +310,12 @@ public class KVHttpServer implements EgressListener
 
             final long corrId = sendPut(aeronCluster, key, value);
 
-            final CompletableFuture<Boolean> resultFuture = new CompletableFuture<>();
-            pendingResponses.put(corrId, resultFuture);
+            final CompletableFuture<Boolean> future = new CompletableFuture<>();
+            boolResponses.put(corrId, future);
 
             try {
-                boolean result = resultFuture.get(2, TimeUnit.SECONDS);
-                return new Gson().toJson(Map.of("status", "OK", "putSucceeded", result));
+                boolean result = future.get(2, TimeUnit.SECONDS);
+                return new Gson().toJson(Map.of("status", "OK", "success", result));
             } catch (TimeoutException e) {
                 res.status(504);
                 return "{\"error\": \"Timeout waiting for cluster response\"}";
@@ -343,12 +336,38 @@ public class KVHttpServer implements EgressListener
 
             final long corrId = sendGet(aeronCluster, key);
 
-            final CompletableFuture<String> resultFuture = new CompletableFuture<>();
-            pendingResponses.put(corrId, resultFuture);
+            final CompletableFuture<String> future = new CompletableFuture<>();
+            stringResponses.put(corrId, future);
 
             try {
-                String value = resultFuture.get(2, TimeUnit.SECONDS);
+                String value = future.get(2, TimeUnit.SECONDS);
                 return new Gson().toJson(Map.of("status", "OK", "value", value));
+            } catch (TimeoutException e) {
+                res.status(504);
+                return "{\"error\": \"Timeout waiting for cluster response\"}";
+            } catch (Exception e) {
+                res.status(500);
+                return "{\"error\": \"Unexpected error: " + e.getMessage() + "\"}";
+            }
+        });
+
+        post("/kv/delete", (req, res) -> {
+            res.type("application/json");
+
+            final String key = req.queryParams("key");
+            if (key == null) {
+                res.status(400);
+                return "{\"error\": \"Missing 'key' parameter\"}";
+            }
+
+            final long corrId = sendDelete(aeronCluster, key);
+
+            final CompletableFuture<Boolean> future = new CompletableFuture<>();
+            boolResponses.put(corrId, future);
+
+            try {
+                Boolean success = future.get(2, TimeUnit.SECONDS);
+                return new Gson().toJson(Map.of("status", "OK", "success", success));
             } catch (TimeoutException e) {
                 res.status(504);
                 return "{\"error\": \"Timeout waiting for cluster response\"}";
@@ -372,12 +391,12 @@ public class KVHttpServer implements EgressListener
 
             final long corrId = sendCAS(aeronCluster, key, expected, newValue);
 
-            final CompletableFuture<Boolean> resultFuture = new CompletableFuture<>();
-            pendingResponses.put(corrId, resultFuture);
+            final CompletableFuture<Boolean> future = new CompletableFuture<>();
+            boolResponses.put(corrId, future);
 
             try {
-                boolean success = resultFuture.get(2, TimeUnit.SECONDS);
-                return new Gson().toJson(Map.of("status", "OK", "casSucceeded", success));
+                boolean success = future.get(2, TimeUnit.SECONDS);
+                return new Gson().toJson(Map.of("status", "OK", "success", success));
             } catch (TimeoutException e) {
                 res.status(504);
                 return "{\"error\": \"Timeout waiting for cluster response\"}";

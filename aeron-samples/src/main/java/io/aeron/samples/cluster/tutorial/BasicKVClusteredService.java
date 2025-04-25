@@ -46,6 +46,8 @@ import io.aeron.cluster.service.ClusteredService;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 
+import java.util.Arrays;
+
 /**
  * KV service implementing the business logic.
  */
@@ -53,11 +55,22 @@ import io.aeron.logbuffer.Header;
 public class BasicKVClusteredService implements ClusteredService
 // end::new_service[]
 {
+    // Shared Offsets
     static final int CORRELATION_ID_OFFSET = 0;
-    static final int OPCODE_OFFSET          = CORRELATION_ID_OFFSET + BitUtil.SIZE_OF_LONG; 
-    static final int KEY_LENGTH_OFFSET      = OPCODE_OFFSET + BitUtil.SIZE_OF_BYTE;
-    static final int VALUE_LENGTH_OFFSET    = KEY_LENGTH_OFFSET + BitUtil.SIZE_OF_INT;
-    static final int HEADER_LENGTH          = VALUE_LENGTH_OFFSET + BitUtil.SIZE_OF_INT; 
+    static final int OPCODE_OFFSET         = CORRELATION_ID_OFFSET + Long.BYTES;
+    static final int KEY_LENGTH_OFFSET     = OPCODE_OFFSET + Byte.BYTES;
+
+    // PUT-specific 
+    static final int VALUE_LENGTH_OFFSET   = KEY_LENGTH_OFFSET + Integer.BYTES; // 8 + 1 + 4 = 13
+    static final int HEADER_LENGTH_PUT     = VALUE_LENGTH_OFFSET + Integer.BYTES; // 8 + 1 + 4 + 4 = 17
+
+    // GET-specific 
+    static final int HEADER_LENGTH_GET     = KEY_LENGTH_OFFSET + Integer.BYTES;   // 8 + 1 + 4 = 13
+
+    // CAS-specific
+    static final int EXPECTED_LENGTH_OFFSET = KEY_LENGTH_OFFSET + Integer.BYTES;
+    static final int NEW_LENGTH_OFFSET      = EXPECTED_LENGTH_OFFSET + Integer.BYTES;
+    static final int HEADER_LENGTH_CAS      = NEW_LENGTH_OFFSET + Integer.BYTES;  // 8 + 1 + 4 + 4 + 4 = 21
 
     static final byte OPCODE_GET = 0;
     static final byte OPCODE_PUT = 1;
@@ -113,83 +126,114 @@ public class BasicKVClusteredService implements ClusteredService
         final int length,
         final Header header)
     {
-        System.out.println("[onSessionMessage] offset=" + offset + ", length=" + length);
+        System.out.println("[onSessionMessage] offset: " + offset + ", length: " + length);
         
-        final long correlationId = buffer.getLong(offset + CORRELATION_ID_OFFSET);                   // <1>
+        final long correlationId = buffer.getLong(offset + CORRELATION_ID_OFFSET);
         final byte opCode = buffer.getByte(offset + OPCODE_OFFSET);
         final int keyLen = buffer.getInt(offset + KEY_LENGTH_OFFSET);
-        final int valueLen = buffer.getInt(offset + VALUE_LENGTH_OFFSET);
+        System.out.printf("     [onSessionMessage] correlationId: %d opCode: %d%n", correlationId, opCode);
 
-        System.out.println("    [onSessionMessage] 1");
-        final int keyOffset = offset + HEADER_LENGTH;
-        final byte[] keyBytes = new byte[keyLen];
-        buffer.getBytes(keyOffset, keyBytes);
-        final String key = new String(keyBytes, StandardCharsets.UTF_8);
-
-        System.out.println("    [onSessionMessage] 2: key=" + key + ", opCode=" + opCode);
+        boolean casSucceeded = false;
         String value = null;
-        if (opCode == OPCODE_PUT) { // PUT
+        if (opCode == OPCODE_PUT) { // PUT  
+            final int keyOffset = offset + HEADER_LENGTH_PUT;
+            final byte[] keyBytes = new byte[keyLen];
+            buffer.getBytes(keyOffset, keyBytes);
+            final String key = new String(keyBytes, StandardCharsets.UTF_8);
+
+            final int valueLen = buffer.getInt(offset + VALUE_LENGTH_OFFSET);
+            final int valueOffset = keyOffset + keyLen;
             byte[] valueBytes = new byte[valueLen];
-            buffer.getBytes(keyOffset + keyLen, valueBytes);
+            buffer.getBytes(valueOffset, valueBytes);
             value = new String(valueBytes, StandardCharsets.UTF_8);
+            
             kvStore.put(key, value);
+            System.out.printf("     [PUT] %s -> %s%n", key, value);
+
         } else if (opCode == OPCODE_GET) { // GET
+            final int keyOffset = offset + HEADER_LENGTH_GET;
+            final byte[] keyBytes = new byte[keyLen];
+            buffer.getBytes(keyOffset, keyBytes);
+            final String key = new String(keyBytes, StandardCharsets.UTF_8);
+
             value = kvStore.get(key);
+            System.out.printf("     [GET] %s -> %s%n", key, value);
         } else if (opCode == OPCODE_DELETE) { // DELETE
+            final int keyOffset = offset + HEADER_LENGTH_GET;
+            final byte[] keyBytes = new byte[keyLen];
+            buffer.getBytes(keyOffset, keyBytes);
+            final String key = new String(keyBytes, StandardCharsets.UTF_8);
+
             kvStore.remove(key);
-        } 
-        else if (opCode == OPCODE_CAS) {
-            // Advance offset to read expected and new values
-            int valueOffset = keyOffset + keyLen;
+            System.out.printf("     [DELETE] key: %s (removed)%n", key);
+        } else if (opCode == OPCODE_CAS) {
+            System.out.printf("     [CAS] offset: %d, HEADER_LENGTH_CAS: %d%n", offset, HEADER_LENGTH_CAS);
 
-            final int expectedLen = buffer.getInt(valueOffset);
-            valueOffset += BitUtil.SIZE_OF_INT;
+            final int keyOffset = offset + HEADER_LENGTH_CAS;
+            final byte[] keyBytes = new byte[keyLen];
+            buffer.getBytes(keyOffset, keyBytes);
+            final String key = new String(keyBytes, StandardCharsets.UTF_8);
+            System.out.printf("     [CAS] key (decoded): '%s'%n", key);
 
+            final int expectedLen = buffer.getInt(offset + EXPECTED_LENGTH_OFFSET);
+            int readOffset = keyOffset + keyLen;
             final byte[] expectedBytes = new byte[expectedLen];
-            buffer.getBytes(valueOffset, expectedBytes);
-            valueOffset += expectedLen;
-
-            final int newLen = buffer.getInt(valueOffset);
-            valueOffset += BitUtil.SIZE_OF_INT;
-
-            final byte[] newBytes = new byte[newLen];
-            buffer.getBytes(valueOffset, newBytes);
-
+            buffer.getBytes(readOffset, expectedBytes);
             final String expectedValue = new String(expectedBytes, StandardCharsets.UTF_8);
+            System.out.printf("     [CAS] expectedValue (decoded): '%s'%n", expectedValue);
+
+            final int newLen = buffer.getInt(offset + NEW_LENGTH_OFFSET);
+            readOffset += expectedLen;
+            final byte[] newBytes = new byte[newLen];
+            buffer.getBytes(readOffset, newBytes);
             final String newValue = new String(newBytes, StandardCharsets.UTF_8);
+            System.out.printf("     [CAS] newValue (decoded): %s%n", newValue);
 
-            // Perform CAS
             String current = kvStore.get(key);
-            boolean success = Objects.equals(current, expectedValue);
-            if (success) kvStore.put(key, newValue);
+            casSucceeded = Objects.equals(current, expectedValue);
+            System.out.printf("     [CAS] key: %s expected: '%s' actual: '%s' new: '%s' success: %s%n", key, expectedValue, current, newValue, casSucceeded);
 
-            // Send back response like: [correlationId][byte success=1/0]
-
+            if (casSucceeded) {
+                kvStore.put(key, newValue);
+                System.out.println("        [CAS] KV store updated.");
+            }
         }
         
-        System.out.println("    [onSessionMessage] 4");
         if (null != session)                                                                         // <3>
         {
-            System.out.println("    [onSessionMessage] 5");
             egressMessageBuffer.putLong(CORRELATION_ID_OFFSET, correlationId);                       // <4>
 
             if (opCode == OPCODE_GET) { // GET
-                System.out.println("    [onSessionMessage] 6");
                 byte[] valBytes = (value != null) ? value.getBytes(StandardCharsets.UTF_8) : new byte[0];
-                egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + BitUtil.SIZE_OF_LONG, (byte)(value != null ? 1 : 0));
-                egressMessageBuffer.putInt(CORRELATION_ID_OFFSET + BitUtil.SIZE_OF_LONG + 1, valBytes.length);
-                egressMessageBuffer.putBytes(CORRELATION_ID_OFFSET + BitUtil.SIZE_OF_LONG + 1 + BitUtil.SIZE_OF_INT, valBytes);
-                final int responseLength = BitUtil.SIZE_OF_LONG + 1 + BitUtil.SIZE_OF_INT + valBytes.length;
+                egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + Long.BYTES, (byte)(value != null ? 1 : 0));
+                egressMessageBuffer.putInt(CORRELATION_ID_OFFSET + Long.BYTES + 1, valBytes.length);
+                egressMessageBuffer.putBytes(CORRELATION_ID_OFFSET + Long.BYTES + 1 + Integer.BYTES, valBytes);
+                final int responseLength = Long.BYTES + 1 + Integer.BYTES + valBytes.length;
+
+                System.out.printf("[RESPONSE-GET] correlationId: %d length: %d value: %s%n", correlationId, responseLength, value);
 
                 idleStrategy.reset();
                 while (session.offer(egressMessageBuffer, 0, responseLength) < 0) {
                     idleStrategy.idle();
                 }
 
+            } else if (opCode == OPCODE_CAS) { // CAS
+                byte successByte = (byte) (casSucceeded ? 1 : 0);
+                egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + Long.BYTES, successByte);
+                final int responseLength = Long.BYTES + 1;
+
+                System.out.printf("[RESPONSE-CAS] correlationId: %d length: %d success: %s%n",
+                                correlationId, responseLength, casSucceeded);
+
+                idleStrategy.reset();
+                while (session.offer(egressMessageBuffer, 0, responseLength) < 0) {
+                    idleStrategy.idle();
+                }
             } else { // PUT or DELETE – simple ack
-                System.out.println("    [onSessionMessage] 7");
-                egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + BitUtil.SIZE_OF_LONG, (byte)1);
-                final int responseLength = BitUtil.SIZE_OF_LONG + 1;
+                egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + Long.BYTES, (byte)1);
+                final int responseLength = Long.BYTES + 1;
+
+                System.out.printf("[RESPONSE-ACK] correlationId: %d length: %d%n", correlationId, responseLength);
 
                 idleStrategy.reset();
                 while (session.offer(egressMessageBuffer, 0, responseLength) < 0) {
@@ -197,7 +241,6 @@ public class BasicKVClusteredService implements ClusteredService
                 }
             }
         }
-        System.out.println("    [onSessionMessage] 8");
     }
     // end::message[]
 
@@ -213,20 +256,19 @@ public class BasicKVClusteredService implements ClusteredService
             final byte[] keyBytes = entry.getKey().getBytes(StandardCharsets.UTF_8);
             final byte[] valueBytes = entry.getValue().getBytes(StandardCharsets.UTF_8);
 
-            final int recordLength = BitUtil.SIZE_OF_INT + keyBytes.length + BitUtil.SIZE_OF_INT + valueBytes.length;
+            final int recordLength = Integer.BYTES + keyBytes.length + Integer.BYTES + valueBytes.length;
             final MutableDirectBuffer snapshotBuffer = new UnsafeBuffer(ByteBuffer.allocateDirect(recordLength));
 
             int offset = 0;
             snapshotBuffer.putInt(offset, keyBytes.length);
-            offset += BitUtil.SIZE_OF_INT;
+            offset += Integer.BYTES;
             snapshotBuffer.putBytes(offset, keyBytes);
             offset += keyBytes.length;
 
             snapshotBuffer.putInt(offset, valueBytes.length);
-            offset += BitUtil.SIZE_OF_INT;
+            offset += Integer.BYTES;
             snapshotBuffer.putBytes(offset, valueBytes);
 
-            System.out.println("[onTakeSnapshot] 1");
             // publish to snapshot log
             idleStrategy.reset();
             while (snapshotPublication.offer(snapshotBuffer, 0, recordLength) < 0)
@@ -234,7 +276,6 @@ public class BasicKVClusteredService implements ClusteredService
                 idleStrategy.idle();
             }
         }
-        System.out.println("    [onTakeSnapshot] 2");
     }
     // end::takeSnapshot[]
 
@@ -247,7 +288,7 @@ public class BasicKVClusteredService implements ClusteredService
 
             // Parse key length and key
             final int keyLen = buffer.getInt(readOffset);
-            readOffset += BitUtil.SIZE_OF_INT;
+            readOffset += Integer.BYTES;
 
             final byte[] keyBytes = new byte[keyLen];
             buffer.getBytes(readOffset, keyBytes);
@@ -255,7 +296,7 @@ public class BasicKVClusteredService implements ClusteredService
 
             // Parse value length and value
             final int valLen = buffer.getInt(readOffset);
-            readOffset += BitUtil.SIZE_OF_INT;
+            readOffset += Integer.BYTES;
 
             final byte[] valBytes = new byte[valLen];
             buffer.getBytes(readOffset, valBytes);
