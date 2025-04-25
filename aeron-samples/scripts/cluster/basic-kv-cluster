@@ -43,7 +43,7 @@ function startAll() {
   startNode 1
   startNode 2
 
-  tail -n 100 -F logs/cluster-*.log
+  # tail -n 100 -F logs/cluster-*.log
 }
 # end::start_jvm[]
 
