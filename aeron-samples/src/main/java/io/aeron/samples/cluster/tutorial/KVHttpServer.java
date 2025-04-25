@@ -77,8 +77,6 @@ public class KVHttpServer implements EgressListener
 // end::client[]
 {
     private AeronCluster aeronCluster;
-
-    private final MutableDirectBuffer actionBidBuffer = new ExpandableArrayBuffer();
     private final IdleStrategy idleStrategy = new BackoffIdleStrategy();
     
     private final Map<Long, CompletableFuture<String>> stringResponses = new ConcurrentHashMap<>();
@@ -111,6 +109,7 @@ public class KVHttpServer implements EgressListener
         if (length > Long.BYTES + 1) {
             final CompletableFuture<String> future = stringResponses.remove(correlationId);
             if (future == null) {
+                System.out.println(" }");
                 System.err.println("No pending GET future found for correlationId: " + correlationId + " }");
                 return;
             }
@@ -189,59 +188,56 @@ public class KVHttpServer implements EgressListener
         return sb.toString();
     }
 
-    private long sendPut(final AeronCluster aeronCluster, final String key, final String value)
+    private void sendPut(final AeronCluster aeronCluster, final String key, final String value, final long corrId)
     {
-        final long corrId = correlationId.getAndIncrement();
+        final MutableDirectBuffer buffer = new ExpandableArrayBuffer();
 
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         byte[] valBytes = value.getBytes(StandardCharsets.UTF_8);
 
         int messageLength = HEADER_LENGTH_PUT + keyBytes.length + valBytes.length;
 
-        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
-        actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_PUT);
-        actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
-        actionBidBuffer.putInt(VALUE_LENGTH_OFFSET, valBytes.length);
-        actionBidBuffer.putBytes(HEADER_LENGTH_PUT, keyBytes);
-        actionBidBuffer.putBytes(HEADER_LENGTH_PUT + keyBytes.length, valBytes);
+        buffer.putLong(CORRELATION_ID_OFFSET, corrId);
+        buffer.putByte(OPCODE_OFFSET, OPCODE_PUT);
+        buffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
+        buffer.putInt(VALUE_LENGTH_OFFSET, valBytes.length);
+        buffer.putBytes(HEADER_LENGTH_PUT, keyBytes);
+        buffer.putBytes(HEADER_LENGTH_PUT + keyBytes.length, valBytes);
 
         idleStrategy.reset();
-        while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
+        while (aeronCluster.offer(buffer, 0, messageLength) < 0)
         {
             idleStrategy.idle(aeronCluster.pollEgress());
         }
-
-        return corrId;
     }
 
-    private long sendGet(final AeronCluster aeronCluster, final String key)
+    private void sendGet(final AeronCluster aeronCluster, final String key, final long corrId)
     {
-        final long corrId = correlationId.getAndIncrement();
+        final MutableDirectBuffer buffer = new ExpandableArrayBuffer();
 
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         int messageLength = HEADER_LENGTH_GET + keyBytes.length;
 
-        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
-        actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_GET);
-        actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
-        actionBidBuffer.putBytes(HEADER_LENGTH_GET, keyBytes);
+        buffer.putLong(CORRELATION_ID_OFFSET, corrId);
+        buffer.putByte(OPCODE_OFFSET, OPCODE_GET);
+        buffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
+        buffer.putBytes(HEADER_LENGTH_GET, keyBytes);
 
         idleStrategy.reset();
-        while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
+        while (aeronCluster.offer(buffer, 0, messageLength) < 0)
         {
             idleStrategy.idle(aeronCluster.pollEgress());
         }
-
-        return corrId;
     }
 
-    private long sendCAS(
+    private void sendCAS(
         final AeronCluster aeronCluster,
         final String key,
         final String expectedValue,
-        final String newValue)
+        final String newValue, 
+        final long corrId)
     {
-        final long corrId = correlationId.getAndIncrement();
+        final MutableDirectBuffer buffer = new ExpandableArrayBuffer();
 
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         byte[] expectedBytes = expectedValue.getBytes(StandardCharsets.UTF_8);
@@ -249,49 +245,45 @@ public class KVHttpServer implements EgressListener
 
         int messageLength = HEADER_LENGTH_CAS + keyBytes.length + expectedBytes.length + newBytes.length;
 
-        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
-        actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_CAS);
-        actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
-        actionBidBuffer.putInt(EXPECTED_LENGTH_OFFSET, expectedBytes.length);
-        actionBidBuffer.putInt(NEW_LENGTH_OFFSET, newBytes.length);
+        buffer.putLong(CORRELATION_ID_OFFSET, corrId);
+        buffer.putByte(OPCODE_OFFSET, OPCODE_CAS);
+        buffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
+        buffer.putInt(EXPECTED_LENGTH_OFFSET, expectedBytes.length);
+        buffer.putInt(NEW_LENGTH_OFFSET, newBytes.length);
 
         int payloadOffset = HEADER_LENGTH_CAS;
-        actionBidBuffer.putBytes(payloadOffset, keyBytes);
+        buffer.putBytes(payloadOffset, keyBytes);
         payloadOffset += keyBytes.length;
 
-        actionBidBuffer.putBytes(payloadOffset, expectedBytes);
+        buffer.putBytes(payloadOffset, expectedBytes);
         payloadOffset += expectedBytes.length;
 
-        actionBidBuffer.putBytes(payloadOffset, newBytes);
+        buffer.putBytes(payloadOffset, newBytes);
 
         idleStrategy.reset();
-        while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
+        while (aeronCluster.offer(buffer, 0, messageLength) < 0)
         {
             idleStrategy.idle(aeronCluster.pollEgress());
         }
-
-        return corrId;
     }
 
-    private long sendDelete(final AeronCluster aeronCluster, final String key)
+    private void sendDelete(final AeronCluster aeronCluster, final String key, final long corrId)
     {
-        final long corrId = correlationId.getAndIncrement();
+        final MutableDirectBuffer buffer = new ExpandableArrayBuffer();
 
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         int messageLength = HEADER_LENGTH_GET + keyBytes.length;
 
-        actionBidBuffer.putLong(CORRELATION_ID_OFFSET, corrId);
-        actionBidBuffer.putByte(OPCODE_OFFSET, OPCODE_DELETE);
-        actionBidBuffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
-        actionBidBuffer.putBytes(HEADER_LENGTH_GET, keyBytes);
+        buffer.putLong(CORRELATION_ID_OFFSET, corrId);
+        buffer.putByte(OPCODE_OFFSET, OPCODE_DELETE);
+        buffer.putInt(KEY_LENGTH_OFFSET, keyBytes.length);
+        buffer.putBytes(HEADER_LENGTH_GET, keyBytes);
 
         idleStrategy.reset();
-        while (aeronCluster.offer(actionBidBuffer, 0, messageLength) < 0)
+        while (aeronCluster.offer(buffer, 0, messageLength) < 0)
         {
             idleStrategy.idle(aeronCluster.pollEgress());
         }
-
-        return corrId;
     }
 
     public void startHttpServer() {
@@ -308,10 +300,11 @@ public class KVHttpServer implements EgressListener
                 return "{\"error\": \"Missing 'key' or 'value' parameter\"}";
             }
 
-            final long corrId = sendPut(aeronCluster, key, value);
-
+            final long corrId = correlationId.getAndIncrement();
             final CompletableFuture<Boolean> future = new CompletableFuture<>();
             boolResponses.put(corrId, future);
+
+            sendPut(aeronCluster, key, value, corrId);
 
             try {
                 boolean result = future.get(2, TimeUnit.SECONDS);
@@ -334,10 +327,11 @@ public class KVHttpServer implements EgressListener
                 return "{\"error\": \"Missing 'key' parameter\"}";
             }
 
-            final long corrId = sendGet(aeronCluster, key);
-
+            final long corrId = correlationId.getAndIncrement();
             final CompletableFuture<String> future = new CompletableFuture<>();
             stringResponses.put(corrId, future);
+
+            sendGet(aeronCluster, key, corrId);
 
             try {
                 String value = future.get(2, TimeUnit.SECONDS);
@@ -360,10 +354,11 @@ public class KVHttpServer implements EgressListener
                 return "{\"error\": \"Missing 'key' parameter\"}";
             }
 
-            final long corrId = sendDelete(aeronCluster, key);
-
+            final long corrId = correlationId.getAndIncrement();
             final CompletableFuture<Boolean> future = new CompletableFuture<>();
             boolResponses.put(corrId, future);
+
+            sendDelete(aeronCluster, key, corrId);
 
             try {
                 Boolean success = future.get(2, TimeUnit.SECONDS);
@@ -389,10 +384,11 @@ public class KVHttpServer implements EgressListener
                 return "{\"error\": \"Missing 'key', 'expected', or 'new' parameter\"}";
             }
 
-            final long corrId = sendCAS(aeronCluster, key, expected, newValue);
-
+            final long corrId = correlationId.getAndIncrement();
             final CompletableFuture<Boolean> future = new CompletableFuture<>();
             boolResponses.put(corrId, future);
+
+            sendCAS(aeronCluster, key, expected, newValue, corrId); 
 
             try {
                 boolean success = future.get(2, TimeUnit.SECONDS);
