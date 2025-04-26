@@ -15,6 +15,9 @@
  */
 package io.aeron.samples.cluster.tutorial;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+
 import io.aeron.ExclusivePublication;
 import io.aeron.Image;
 import io.aeron.cluster.codecs.CloseReason;
@@ -57,34 +60,30 @@ public class BasicKVClusteredService implements ClusteredService
 {
     // Shared Offsets
     static final int CORRELATION_ID_OFFSET = 0;
-    static final int OPCODE_OFFSET         = CORRELATION_ID_OFFSET + Long.BYTES;
-    static final int KEY_LENGTH_OFFSET     = OPCODE_OFFSET + Byte.BYTES;
+    static final int OPCODE_OFFSET = CORRELATION_ID_OFFSET + Long.BYTES; 
+    static final int KEY_OFFSET = OPCODE_OFFSET + Byte.BYTES;
 
-    // PUT-specific 
-    static final int VALUE_LENGTH_OFFSET   = KEY_LENGTH_OFFSET + Integer.BYTES; // 8 + 1 + 4 = 13
-    static final int HEADER_LENGTH_PUT     = VALUE_LENGTH_OFFSET + Integer.BYTES; // 8 + 1 + 4 + 4 = 17
-
-    // GET-specific 
-    static final int HEADER_LENGTH_GET     = KEY_LENGTH_OFFSET + Integer.BYTES;   // 8 + 1 + 4 = 13
-
-    // CAS-specific
-    static final int EXPECTED_LENGTH_OFFSET = KEY_LENGTH_OFFSET + Integer.BYTES;
-    static final int NEW_LENGTH_OFFSET      = EXPECTED_LENGTH_OFFSET + Integer.BYTES;
-    static final int HEADER_LENGTH_CAS      = NEW_LENGTH_OFFSET + Integer.BYTES;  // 8 + 1 + 4 + 4 + 4 = 21
+    static final int FIRST_LONG_OFFSET = KEY_OFFSET + Long.BYTES; // 8 + 1 + 4 = 13
+    static final int SECOND_LONG_OFFSET = FIRST_LONG_OFFSET + Long.BYTES;
 
     static final byte OPCODE_GET = 0;
     static final byte OPCODE_PUT = 1;
     static final byte OPCODE_DELETE = 2;
     static final byte OPCODE_CAS = 3;
 
+    // private final ThreadLocal<MutableDirectBuffer> threadLocalEgressBuffer = ThreadLocal.withInitial(() -> new ExpandableArrayBuffer(1024));
     private final MutableDirectBuffer egressMessageBuffer = new ExpandableArrayBuffer();
     private final MutableDirectBuffer snapshotBuffer = new ExpandableArrayBuffer();
 
     // tag::state[]
-    private final Map<String, String> kvStore = new ConcurrentHashMap<>();
+    private final Map<Long, Long> kvStore = new ConcurrentHashMap<>();
     // end::state[]
     private Cluster cluster;
     private IdleStrategy idleStrategy;
+
+    public static String timestamp() {
+        return "[" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss,SSS")) + "] ";
+    }
 
     /**
      * {@inheritDoc}
@@ -99,7 +98,7 @@ public class BasicKVClusteredService implements ClusteredService
         {
             loadSnapshot(cluster, snapshotImage);
         }
-        System.out.println("[SERVER] onStart called — node is starting");
+        System.out.println(timestamp() + "[SERVER] onStart called — node is starting");
     }
     // end::start[]
 
@@ -126,91 +125,60 @@ public class BasicKVClusteredService implements ClusteredService
         final int length,
         final Header header)
     {
-        System.out.println("[onSessionMessage] offset: " + offset + ", length: " + length);
+        System.out.println(timestamp() + "[onSessionMessage] offset: " + offset + ", length: " + length);
         
         final long correlationId = buffer.getLong(offset + CORRELATION_ID_OFFSET);
         final byte opCode = buffer.getByte(offset + OPCODE_OFFSET);
-        final int keyLen = buffer.getInt(offset + KEY_LENGTH_OFFSET);
-        System.out.printf("     [onSessionMessage] correlationId: %d opCode: %d%n", correlationId, opCode);
+        final long key = buffer.getLong(offset + KEY_OFFSET);
+        System.out.printf(timestamp() + 
+            "[THREAD: onSessionMessage] %s handling message (corrId=%d)%n",
+            Thread.currentThread().getName(),
+            correlationId
+        );
+        System.out.printf(timestamp() + "     [onSessionMessage] correlationId: %d opCode: %d%n", correlationId, opCode);
 
         boolean casSucceeded = false;
-        String value = null;
+        long value = 0L;
         if (opCode == OPCODE_PUT) { // PUT  
-            final int keyOffset = offset + HEADER_LENGTH_PUT;
-            final byte[] keyBytes = new byte[keyLen];
-            buffer.getBytes(keyOffset, keyBytes);
-            final String key = new String(keyBytes, StandardCharsets.UTF_8);
-
-            final int valueLen = buffer.getInt(offset + VALUE_LENGTH_OFFSET);
-            final int valueOffset = keyOffset + keyLen;
-            byte[] valueBytes = new byte[valueLen];
-            buffer.getBytes(valueOffset, valueBytes);
-            value = new String(valueBytes, StandardCharsets.UTF_8);
-            
+            value = buffer.getLong(offset + FIRST_LONG_OFFSET);
             kvStore.put(key, value);
-            System.out.printf("     [PUT] %s -> %s%n", key, value);
 
+            System.out.printf(timestamp() + "     [PUT] %d -> %d%n", key, value);
         } else if (opCode == OPCODE_GET) { // GET
-            final int keyOffset = offset + HEADER_LENGTH_GET;
-            final byte[] keyBytes = new byte[keyLen];
-            buffer.getBytes(keyOffset, keyBytes);
-            final String key = new String(keyBytes, StandardCharsets.UTF_8);
-
-            value = kvStore.get(key);
-            System.out.printf("     [GET] %s -> %s%n", key, value);
+            value = kvStore.getOrDefault(key, -1L);
+            System.out.printf(timestamp() + "     [GET] %d -> %d%n", key, value);
         } else if (opCode == OPCODE_DELETE) { // DELETE
-            final int keyOffset = offset + HEADER_LENGTH_GET;
-            final byte[] keyBytes = new byte[keyLen];
-            buffer.getBytes(keyOffset, keyBytes);
-            final String key = new String(keyBytes, StandardCharsets.UTF_8);
-
             kvStore.remove(key);
-            System.out.printf("     [DELETE] key: %s (removed)%n", key);
+
+            System.out.printf(timestamp() + "     [DELETE] key: %s (removed)%n", key);
         } else if (opCode == OPCODE_CAS) {
-            System.out.printf("     [CAS] offset: %d, HEADER_LENGTH_CAS: %d%n", offset, HEADER_LENGTH_CAS);
+            final long expected = buffer.getLong(offset + FIRST_LONG_OFFSET);
+            final long newValue = buffer.getLong(offset + SECOND_LONG_OFFSET);
 
-            final int keyOffset = offset + HEADER_LENGTH_CAS;
-            final byte[] keyBytes = new byte[keyLen];
-            buffer.getBytes(keyOffset, keyBytes);
-            final String key = new String(keyBytes, StandardCharsets.UTF_8);
-            System.out.printf("     [CAS] key (decoded): '%s'%n", key);
+            Long current = kvStore.get(key);
+            casSucceeded = (current != null && current == expected);
 
-            final int expectedLen = buffer.getInt(offset + EXPECTED_LENGTH_OFFSET);
-            int readOffset = keyOffset + keyLen;
-            final byte[] expectedBytes = new byte[expectedLen];
-            buffer.getBytes(readOffset, expectedBytes);
-            final String expectedValue = new String(expectedBytes, StandardCharsets.UTF_8);
-            System.out.printf("     [CAS] expectedValue (decoded): '%s'%n", expectedValue);
-
-            final int newLen = buffer.getInt(offset + NEW_LENGTH_OFFSET);
-            readOffset += expectedLen;
-            final byte[] newBytes = new byte[newLen];
-            buffer.getBytes(readOffset, newBytes);
-            final String newValue = new String(newBytes, StandardCharsets.UTF_8);
-            System.out.printf("     [CAS] newValue (decoded): %s%n", newValue);
-
-            String current = kvStore.get(key);
-            casSucceeded = Objects.equals(current, expectedValue);
-            System.out.printf("     [CAS] key: %s expected: '%s' actual: '%s' new: '%s' success: %s%n", key, expectedValue, current, newValue, casSucceeded);
+            System.out.printf(timestamp() + "     [CAS] key: %d expected: %d actual: %d new: %d success: %s%n",
+                key, expected, current, newValue, casSucceeded);
 
             if (casSucceeded) {
                 kvStore.put(key, newValue);
-                System.out.println("        [CAS] KV store updated.");
+                System.out.println(timestamp() + "        [CAS] KV store updated.");
             }
         }
         
+        // final MutableDirectBuffer egressMessageBuffer = threadLocalEgressBuffer.get();
         if (null != session)                                                                         // <3>
         {
             egressMessageBuffer.putLong(CORRELATION_ID_OFFSET, correlationId);                       // <4>
 
             if (opCode == OPCODE_GET) { // GET
-                byte[] valBytes = (value != null) ? value.getBytes(StandardCharsets.UTF_8) : new byte[0];
-                egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + Long.BYTES, (byte)(value != null ? 1 : 0));
-                egressMessageBuffer.putInt(CORRELATION_ID_OFFSET + Long.BYTES + 1, valBytes.length);
-                egressMessageBuffer.putBytes(CORRELATION_ID_OFFSET + Long.BYTES + 1 + Integer.BYTES, valBytes);
-                final int responseLength = Long.BYTES + 1 + Integer.BYTES + valBytes.length;
+                egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + Long.BYTES, (byte)(value != -1L ? 1 : 0));
+                egressMessageBuffer.putLong(CORRELATION_ID_OFFSET + Long.BYTES + 1, value);
 
-                System.out.printf("[RESPONSE-GET] correlationId: %d length: %d value: %s%n", correlationId, responseLength, value);
+                final int responseLength = Long.BYTES + 1 + Long.BYTES;
+
+                System.out.printf(timestamp() + "[RESPONSE-GET] correlationId: %d length: %d value: %d%n", correlationId, responseLength, value);
 
                 idleStrategy.reset();
                 while (session.offer(egressMessageBuffer, 0, responseLength) < 0) {
@@ -218,12 +186,12 @@ public class BasicKVClusteredService implements ClusteredService
                 }
 
             } else if (opCode == OPCODE_CAS) { // CAS
-                byte successByte = (byte) (casSucceeded ? 1 : 0);
-                egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + Long.BYTES, successByte);
+                egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + Long.BYTES, (byte)(casSucceeded ? 1 : 0));
+
                 final int responseLength = Long.BYTES + 1;
 
-                System.out.printf("[RESPONSE-CAS] correlationId: %d length: %d success: %s%n",
-                                correlationId, responseLength, casSucceeded);
+                System.out.printf(timestamp() + "[RESPONSE-CAS] correlationId: %d length: %d success: %s%n", correlationId, responseLength, casSucceeded);
+
 
                 idleStrategy.reset();
                 while (session.offer(egressMessageBuffer, 0, responseLength) < 0) {
@@ -231,9 +199,10 @@ public class BasicKVClusteredService implements ClusteredService
                 }
             } else { // PUT or DELETE – simple ack
                 egressMessageBuffer.putByte(CORRELATION_ID_OFFSET + Long.BYTES, (byte)1);
+
                 final int responseLength = Long.BYTES + 1;
 
-                System.out.printf("[RESPONSE-ACK] correlationId: %d length: %d%n", correlationId, responseLength);
+                System.out.printf(timestamp() + "[RESPONSE-ACK] correlationId: %d length: %d%n", correlationId, responseLength);
 
                 idleStrategy.reset();
                 while (session.offer(egressMessageBuffer, 0, responseLength) < 0) {
@@ -250,28 +219,16 @@ public class BasicKVClusteredService implements ClusteredService
     // tag::takeSnapshot[]
     public void onTakeSnapshot(final ExclusivePublication snapshotPublication)
     {
-        System.out.println("[onTakeSnapshot]");
-        for (Map.Entry<String, String> entry : kvStore.entrySet()) {
-            System.out.println("    [onTakeSnapshot] " + entry.getKey() + " = " + entry.getValue());
-            final byte[] keyBytes = entry.getKey().getBytes(StandardCharsets.UTF_8);
-            final byte[] valueBytes = entry.getValue().getBytes(StandardCharsets.UTF_8);
+        System.out.println(timestamp() + "[onTakeSnapshot]");
+        for (Map.Entry<Long, Long> entry : kvStore.entrySet()) {
+            System.out.println(timestamp() + "    [onTakeSnapshot] " + entry.getKey() + " = " + entry.getValue());
+            final MutableDirectBuffer snapshotBuffer = new UnsafeBuffer(ByteBuffer.allocateDirect(2 * Long.BYTES));
 
-            final int recordLength = Integer.BYTES + keyBytes.length + Integer.BYTES + valueBytes.length;
-            final MutableDirectBuffer snapshotBuffer = new UnsafeBuffer(ByteBuffer.allocateDirect(recordLength));
+            snapshotBuffer.putLong(0, entry.getKey());
+            snapshotBuffer.putLong(Long.BYTES, entry.getValue());
 
-            int offset = 0;
-            snapshotBuffer.putInt(offset, keyBytes.length);
-            offset += Integer.BYTES;
-            snapshotBuffer.putBytes(offset, keyBytes);
-            offset += keyBytes.length;
-
-            snapshotBuffer.putInt(offset, valueBytes.length);
-            offset += Integer.BYTES;
-            snapshotBuffer.putBytes(offset, valueBytes);
-
-            // publish to snapshot log
             idleStrategy.reset();
-            while (snapshotPublication.offer(snapshotBuffer, 0, recordLength) < 0)
+            while (snapshotPublication.offer(snapshotBuffer, 0, 2 * Long.BYTES) < 0)
             {
                 idleStrategy.idle();
             }
@@ -282,31 +239,13 @@ public class BasicKVClusteredService implements ClusteredService
     // tag::loadSnapshot[]
     private void loadSnapshot(final Cluster cluster, final Image snapshotImage)
     {
-        System.out.println("[loadSnapshot]");
+        System.out.println(timestamp() + "[loadSnapshot]");
         final FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
-            int readOffset = offset;
-
-            // Parse key length and key
-            final int keyLen = buffer.getInt(readOffset);
-            readOffset += Integer.BYTES;
-
-            final byte[] keyBytes = new byte[keyLen];
-            buffer.getBytes(readOffset, keyBytes);
-            readOffset += keyLen;
-
-            // Parse value length and value
-            final int valLen = buffer.getInt(readOffset);
-            readOffset += Integer.BYTES;
-
-            final byte[] valBytes = new byte[valLen];
-            buffer.getBytes(readOffset, valBytes);
-
-            final String key = new String(keyBytes, StandardCharsets.UTF_8);
-            final String value = new String(valBytes, StandardCharsets.UTF_8);
+            final long key = buffer.getLong(offset);
+            final long value = buffer.getLong(offset + Long.BYTES);
 
             kvStore.put(key, value);  // Restore into map
         };
-        System.out.println("[loadSnapshot] 1");
         while (!snapshotImage.isEndOfStream())
         {
             final int fragmentsPolled = snapshotImage.poll(fragmentHandler, 10);
@@ -314,7 +253,6 @@ public class BasicKVClusteredService implements ClusteredService
         }
 
         assert snapshotImage.isEndOfStream();   
-        System.out.println("[loadSnapshot] 2");
     }
     // end::loadSnapshot[]
 
@@ -337,7 +275,7 @@ public class BasicKVClusteredService implements ClusteredService
      */
     public void onSessionOpen(final ClientSession session, final long timestamp)
     {
-        System.out.println("onSessionOpen(" + session + ")");
+        System.out.println(timestamp() + "onSessionOpen(" + session + ")");
     }
 
     /**
@@ -345,7 +283,7 @@ public class BasicKVClusteredService implements ClusteredService
      */
     public void onSessionClose(final ClientSession session, final long timestamp, final CloseReason closeReason)
     {
-        System.out.println("onSessionClose(" + session + ")");
+        System.out.println(timestamp() + "onSessionClose(" + session + ") with reason: " + closeReason);
     }
 
     /**
