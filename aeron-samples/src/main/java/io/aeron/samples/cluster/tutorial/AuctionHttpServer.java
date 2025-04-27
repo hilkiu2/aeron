@@ -297,9 +297,11 @@ public class AuctionHttpServer implements EgressListener
                 if (++attempts > 10000)
                 {
                     System.err.println("Failed to send bid to Aeron, correlationID: " + corrId);
+                    pendingResponses.remove(corrId);
                     res.status(500);
                     return "{\"error\": \"Failed to deliver bid to cluster\"}";
                 }
+                // LockSupport.parkNanos(100_000);
                 Thread.yield();
             }
 
@@ -338,7 +340,7 @@ public class AuctionHttpServer implements EgressListener
 
             // Launch keep-alive thread
             new Thread(() -> {
-                final long keepAliveIntervalNanos = TimeUnit.SECONDS.toNanos(3); // send every 3 second
+                final long keepAliveIntervalNanos = TimeUnit.SECONDS.toNanos(2); // send every 2 second
                 long lastKeepAliveTime = System.nanoTime();
 
                 while (!Thread.currentThread().isInterrupted()) {
