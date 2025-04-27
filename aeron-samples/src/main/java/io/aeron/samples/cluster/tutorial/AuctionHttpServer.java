@@ -68,6 +68,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import spark.Response;
 import java.util.concurrent.locks.LockSupport;
+import io.aeron.Publication;
 
 import static io.aeron.samples.cluster.tutorial.BasicAuctionClusteredService.*;
 import static io.aeron.samples.cluster.tutorial.BasicAuctionClusteredServiceNode.calculatePort;
@@ -85,16 +86,15 @@ public class AuctionHttpServer implements EgressListener
     private final IdleStrategy idleStrategy = new BackoffIdleStrategy();
     
     private static final AtomicLong correlationId = new AtomicLong();
-    private final Map<Long, CompletableFuture<Boolean>> pendingResponses = new ConcurrentHashMap<>();
-
-    private long winningCustomerId;
-    private long winningPrice;
+    private final Map<Long, CompletableFuture<Map<String, Object>>> pendingResponses = new ConcurrentHashMap<>();
 
     private static final int CORRELATION_ID_OFFSET = 0;
-    private static final int CUSTOMER_ID_OFFSET = CORRELATION_ID_OFFSET + Long.BYTES;
-    private static final int PRICE_OFFSET = CUSTOMER_ID_OFFSET + Long.BYTES;
+    private static final int ITEM_ID_OFFSET = CORRELATION_ID_OFFSET + Long.BYTES;
+    private static final int PRICE_OFFSET = ITEM_ID_OFFSET + Long.BYTES;
     private static final int BID_SUCCEEDED_OFFSET = PRICE_OFFSET + Long.BYTES;
     private static final int EGRESS_MESSAGE_LENGTH = BID_SUCCEEDED_OFFSET + Byte.BYTES;
+
+    private final AtomicBoolean isReconnecting = new AtomicBoolean(false);
 
     /**
      * Construct a new cluster client for the auction.
@@ -117,16 +117,18 @@ public class AuctionHttpServer implements EgressListener
         final Header header)
     {
         final long correlationId = buffer.getLong(offset + CORRELATION_ID_OFFSET);
-        final long winningCustomerId = buffer.getLong(offset + CUSTOMER_ID_OFFSET);
+        final long itemId = buffer.getLong(offset + ITEM_ID_OFFSET);
         final long currentWinningPrice = buffer.getLong(offset + PRICE_OFFSET);
-        final boolean bidSucceed = 0 != buffer.getByte(offset + BID_SUCCEEDED_OFFSET);
+        final boolean success = 0 != buffer.getByte(offset + BID_SUCCEEDED_OFFSET);
 
-        this.winningCustomerId = winningCustomerId;
-        this.winningPrice = currentWinningPrice;
-        CompletableFuture<Boolean> future = pendingResponses.get(correlationId);
+        CompletableFuture<Map<String, Object>> future = pendingResponses.get(correlationId);
         if (future != null) {
             System.out.printf("[MATCH] Completing future for correlationId=%d%n", correlationId);
-            future.complete(bidSucceed);
+            Map<String, Object> result = new HashMap<>();
+            result.put("itemId", itemId);
+            result.put("price", currentWinningPrice);
+            result.put("success", success);
+            future.complete(result);
             pendingResponses.remove(correlationId);
         } else {
             System.out.printf("[WARN] No future found for correlationId=%d! Possible race or double complete.%n", correlationId);
@@ -134,8 +136,8 @@ public class AuctionHttpServer implements EgressListener
 
         printOutput(
             "OnMessage: { Cluster Session Id: " + clusterSessionId + ", Correlation Id: " + correlationId +
-            ", Winning Customer Id: " + winningCustomerId + ", Current Winning Price: " + currentWinningPrice +
-            ", Bid Succeed: " + bidSucceed + " }");
+            ", Item Id: " + itemId + ", Current Winning Price: " + currentWinningPrice +
+            ", Succeed: " + success + " }");
     }
 
     /**
@@ -193,23 +195,15 @@ public class AuctionHttpServer implements EgressListener
         return sb.toString();
     }
 
-    public long getWinningCustomerId() {
-        return winningCustomerId;
-    }
-
-    public long getWinningPrice() {
-        return winningPrice;
-    }
-
     private void printOutput(final String message)
     {
         System.out.println(message);
     }
 
-    private <Boolean> String waitForFuture(
-        CompletableFuture<Boolean> future, 
+    private String waitForFuture(
+        CompletableFuture<Map<String, Object>> future, 
         long corrId, 
-        Map<Long, CompletableFuture<Boolean>> responseMap, 
+        Map<Long, CompletableFuture<Map<String, Object>>> responseMap, 
         Response res
     ) {
         long start = System.nanoTime();
@@ -219,33 +213,154 @@ public class AuctionHttpServer implements EgressListener
         while (true) {
             if (future.isDone()) {
                 try {
-                    Boolean result = future.getNow(null);
+                    Map<String, Object> result = future.getNow(null);
                     responseMap.remove(corrId);
                     res.status(200);
                     System.out.printf("[RESPONSE] correlationId=%d | result=%s%n", corrId, result);
-                    return new Gson().toJson(Map.of("status", "OK", "bidSucceed", result));
+
+                    Map<String, Object> wrappedResult = new HashMap<>();
+                    wrappedResult.put("status", "OK");
+                    wrappedResult.putAll(result);
+
+                    return new Gson().toJson(wrappedResult);
                 } catch (Exception e) {
                     responseMap.remove(corrId);
                     res.status(500);
                     System.err.println("    Future failed for correlationId: " + corrId + ", error: " + e.getMessage());
+
                     return new Gson().toJson(Map.of("status", "ERROR", "message", e.getMessage()));
                 }
             }
             if (System.nanoTime() - start > maxWaitNanos) {
                 responseMap.remove(corrId);
                 res.status(504);
-                System.err.println("    Timeout waiting for correlationId: " + corrId);
+                System.err.printf("     [TIMEOUT] correlationId=%d, pendingResponses.size()=%d%n", corrId, responseMap.size());
+
                 return new Gson().toJson(Map.of("status", "ERROR", "message", "Timeout waiting for cluster response"));
             }
             LockSupport.parkNanos(sleepNanos);
         }
     }
 
+    private synchronized void reconnectCluster()
+    {
+        try
+        {
+            if (isReconnecting.get()) {
+                return;
+            }
+
+            isReconnecting.set(true);
+
+            System.out.println("[RECONNECT] Closing old AeronCluster connection...");
+            if (aeronCluster != null)
+            {
+                aeronCluster.close();
+            }
+        }
+        catch (Exception e)
+        {
+            System.err.println("[RECONNECT] Error closing old AeronCluster: " + e.getMessage());
+        }
+
+        try
+        {
+            System.out.println("[RECONNECT] Creating new AeronCluster connection...");
+            this.aeronCluster = AeronCluster.connect(
+                new AeronCluster.Context()
+                    .egressListener(this)
+                    .egressChannel("aeron:udp?endpoint=localhost:0")
+                    .aeronDirectoryName(this.aeronCluster.context().aeronDirectoryName())
+                    .ingressChannel("aeron:udp")
+                    .ingressEndpoints(this.aeronCluster.context().ingressEndpoints())
+            );
+            System.out.println("[RECONNECT] New AeronCluster connection established!");
+        }
+        catch (Exception e)
+        {
+            System.err.println("[RECONNECT] Failed to reconnect to Aeron cluster: " + e.getMessage());
+            e.printStackTrace();
+        }
+        finally
+        {
+            isReconnecting.set(false);
+        }
+    }
+
+
+    private boolean offerWithRetries(DirectBuffer buffer, int length, long corrId, Response res)
+    {
+        int attempts = 0;
+        long result;
+
+        System.out.printf("Sending request: correlationId=%d%n", corrId);
+
+        while (true)
+        {
+            if (isReconnecting.get()) {
+                // Wait for reconnect to complete
+                for (int i = 0; i < 100; i++) {
+                    if (!isReconnecting.get()) break;
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5)); // wait 5ms
+                }
+            }
+            
+            result = aeronCluster.offer(buffer, 0, length);
+
+            if (result > 0)
+            {
+                System.out.printf("[OFFER SUCCESS] correlationId=%d, result=%d after %d attempts%n", corrId, result, attempts);
+                return true;
+            }
+
+            if (result == Publication.NOT_CONNECTED)
+            {
+                System.err.printf("[OFFER FAIL] correlationId=%d: NOT_CONNECTED (-1)%n", corrId);
+            }
+            else if (result == Publication.CLOSED)
+            {
+                System.err.printf("[OFFER FAIL] correlationId=%d: CLOSED (-2). Reconnecting...%n", corrId);
+                reconnectCluster();
+                pendingResponses.remove(corrId);
+                res.status(500);
+                return false;
+            }
+            else if (result == Publication.MAX_POSITION_EXCEEDED)
+            {
+                System.err.printf("[OFFER FAIL] correlationId=%d: MAX_POSITION_EXCEEDED (-3)%n", corrId);
+            }
+            else if (result == 0)
+            {
+                // Backpressure: OK to retry
+                if (attempts % 100 == 0) {
+                    System.err.printf("[OFFER FAIL] correlationId=%d: BACKPRESSURE (0) after %d attempts%n", corrId, attempts);
+                }
+            }
+            else
+            {
+                System.err.printf("[OFFER FAIL] correlationId=%d: UNKNOWN ERROR (result=%d)%n", corrId, result);
+            }
+
+            
+
+            if (++attempts > 10000)
+            {
+                System.err.printf("[OFFER FAILED] correlationId=%d after 10000 attempts%n", corrId);
+                pendingResponses.remove(corrId);
+                res.status(500);
+                return false;
+            }
+
+            LockSupport.parkNanos(100_000); // Pause briefly before retrying
+        }
+    }
+
+
     public void startHttpServer() {
         port(8081);
 
         post("/bid", (req, res) -> {
-            System.out.printf("...post/bid customerId=%s, price=%s%n", req.queryParams("customerId"), req.queryParams("price"));
+            System.out.printf("...post/bid itemId=%s, price=%s%n", req.queryParams("itemId"), req.queryParams("price"));
 
             if (aeronCluster == null) {
                 System.err.println("Aeron not connected. Aborting HTTP server.");
@@ -255,28 +370,28 @@ public class AuctionHttpServer implements EgressListener
             res.type("application/json");
             res.header("Content-Type", "application/json");
 
-            final String customerIdStr = req.queryParams("customerId");
+            final String itemIdStr = req.queryParams("itemId");
             final String priceStr = req.queryParams("price");
 
-            if (customerIdStr == null || priceStr == null)
+            if (itemIdStr == null || priceStr == null)
             {
                 res.status(400);
-                return "{\"error\": \"Missing 'customerId' or 'price' parameter\"}";
+                return "{\"error\": \"Missing 'itemId' or 'price' parameter\"}";
             }
 
-            final long cid, price;
+            final long iid, price;
             try
             {
-                cid = Long.parseLong(customerIdStr);
+                iid = Long.parseLong(itemIdStr);
                 price = Long.parseLong(priceStr);
             } catch (NumberFormatException ex)
             {
                 res.status(400);
-                return "{\"error\": \"Invalid 'customerId' or 'price' format\"}";
+                return "{\"error\": \"Invalid 'itemId' or 'price' format\"}";
             }
 
             final long corrId = correlationId.incrementAndGet(); 
-            final CompletableFuture<Boolean> resultFuture = new CompletableFuture<>();
+            final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
             pendingResponses.put(corrId, resultFuture);
 
             // Log if too many responses are waiting
@@ -286,34 +401,55 @@ public class AuctionHttpServer implements EgressListener
 
             final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
             buffer.putLong(CORRELATION_ID_OFFSET, corrId);
-            buffer.putLong(CUSTOMER_ID_OFFSET, cid);
+            buffer.putLong(ITEM_ID_OFFSET, iid);
             buffer.putLong(PRICE_OFFSET, price);
             final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
 
-            int attempts = 0;
-            System.out.printf("Sending bid: cid=%d, price=%d, correlationId=%d%n", cid, price, corrId);
-            while (aeronCluster.offer(aeronBuffer, 0, buffer.capacity()) < 0)
-            {
-                if (++attempts > 10000)
-                {
-                    System.err.println("Failed to send bid to Aeron, correlationID: " + corrId);
-                    res.status(500);
-                    return "{\"error\": \"Failed to deliver bid to cluster\"}";
-                }
-                Thread.yield();
-            }
+            offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
 
             return waitForFuture(resultFuture, corrId, pendingResponses, res);           
         });
 
-        get("/status", (req, res) -> {
+        get("/item", (req, res) -> {
+            System.out.printf("...get/item itemId=%s%n", req.queryParams("itemId"));
+
             res.type("application/json");
             res.header("Content-Type", "application/json");
 
-            Map<String, Object> status = new HashMap<>();
-            status.put("winningCustomerId", getWinningCustomerId());
-            status.put("winningPrice", getWinningPrice());
-            return new Gson().toJson(status);
+            final String itemIdStr = req.queryParams("itemId");
+
+            if (itemIdStr == null)
+            {
+                res.status(400);
+                return "{\"error\": \"Missing 'itemId' parameter\"}";
+            }
+
+            final long itemId;
+            try
+            {
+                itemId = Long.parseLong(itemIdStr);
+            }
+            catch (NumberFormatException ex)
+            {
+                res.status(400);
+                return "{\"error\": \"Invalid 'itemId' format\"}";
+            }
+
+            final long corrId = correlationId.incrementAndGet();
+            final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
+            pendingResponses.put(corrId, resultFuture);
+
+            final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+            buffer.putLong(CORRELATION_ID_OFFSET, corrId);
+            buffer.putLong(ITEM_ID_OFFSET, itemId);
+            buffer.putLong(PRICE_OFFSET, -1); // Special -1 to indicate "read"
+
+            final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
+
+            offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
+
+            // Wait for the response (same mechanism as bid)
+            return waitForFuture(resultFuture, corrId, pendingResponses, res);
         });
 
         get("/health", (req, res) -> 
@@ -338,7 +474,7 @@ public class AuctionHttpServer implements EgressListener
 
             // Launch keep-alive thread
             new Thread(() -> {
-                final long keepAliveIntervalNanos = TimeUnit.SECONDS.toNanos(3); // send every 3 second
+                final long keepAliveIntervalNanos = TimeUnit.SECONDS.toNanos(1); // send every 3 second
                 long lastKeepAliveTime = System.nanoTime();
 
                 while (!Thread.currentThread().isInterrupted()) {
@@ -351,7 +487,7 @@ public class AuctionHttpServer implements EgressListener
                     }
 
                     if (fragments == 0) {
-                        LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(50));
+                        LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(10));
                     } 
                 }
             }, "Aeron-KeepAlive-Thread").start();
@@ -361,7 +497,6 @@ public class AuctionHttpServer implements EgressListener
             e.printStackTrace();
         }
     }
-
 
     /**
      * Main method for launching the process.
