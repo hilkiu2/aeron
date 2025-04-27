@@ -66,6 +66,9 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
+import spark.Response;
+import java.util.concurrent.locks.LockSupport;
+
 import static io.aeron.samples.cluster.tutorial.BasicAuctionClusteredService.*;
 import static io.aeron.samples.cluster.tutorial.BasicAuctionClusteredServiceNode.calculatePort;
 
@@ -203,6 +206,41 @@ public class AuctionHttpServer implements EgressListener
         System.out.println(message);
     }
 
+    private <Boolean> String waitForFuture(
+        CompletableFuture<Boolean> future, 
+        long corrId, 
+        Map<Long, CompletableFuture<Boolean>> responseMap, 
+        Response res
+    ) {
+        long start = System.nanoTime();
+        long maxWaitNanos = TimeUnit.SECONDS.toNanos(2);
+        long sleepNanos = TimeUnit.MILLISECONDS.toNanos(5); // tiny sleeps between polls
+
+        while (true) {
+            if (future.isDone()) {
+                try {
+                    Boolean result = future.getNow(null);
+                    responseMap.remove(corrId);
+                    res.status(200);
+                    System.out.printf("[RESPONSE] correlationId=%d | result=%s%n", corrId, result);
+                    return new Gson().toJson(Map.of("status", "OK", "bidSucceed", result));
+                } catch (Exception e) {
+                    responseMap.remove(corrId);
+                    res.status(500);
+                    System.err.println("    Future failed for correlationId: " + corrId + ", error: " + e.getMessage());
+                    return new Gson().toJson(Map.of("status", "ERROR", "message", e.getMessage()));
+                }
+            }
+            if (System.nanoTime() - start > maxWaitNanos) {
+                responseMap.remove(corrId);
+                res.status(504);
+                System.err.println("    Timeout waiting for correlationId: " + corrId);
+                return new Gson().toJson(Map.of("status", "ERROR", "message", "Timeout waiting for cluster response"));
+            }
+            LockSupport.parkNanos(sleepNanos);
+        }
+    }
+
     public void startHttpServer() {
         port(8081);
 
@@ -256,31 +294,16 @@ public class AuctionHttpServer implements EgressListener
             System.out.printf("Sending bid: cid=%d, price=%d, correlationId=%d%n", cid, price, corrId);
             while (aeronCluster.offer(aeronBuffer, 0, buffer.capacity()) < 0)
             {
-                if (++attempts > 1000)
+                if (++attempts > 10000)
                 {
-                    System.err.println("Failed to send bid to Aeron.");
+                    System.err.println("Failed to send bid to Aeron, correlationID: " + corrId);
                     res.status(500);
                     return "{\"error\": \"Failed to deliver bid to cluster\"}";
                 }
                 Thread.yield();
             }
 
-            boolean result;
-            try {
-                result = resultFuture.get(2, TimeUnit.SECONDS); 
-                System.out.printf("[RESPONSE] correlationId=%d | result=%s%n", corrId, result);
-            } catch (TimeoutException e) {
-                res.status(504);
-                return "{\"error\": \"Timeout waiting for cluster response\"}";
-            } catch (Exception e) {
-                res.status(500);
-                return "{\"error\": \"Unexpected error: " + e.getMessage() + "\"}";
-            }
-
-            Map<String, Object> status = new HashMap<>();
-            status.put("status", "OK");
-            status.put("bidSucceed", result);
-            return new Gson().toJson(status);
+            return waitForFuture(resultFuture, corrId, pendingResponses, res);           
         });
 
         get("/status", (req, res) -> {
@@ -315,14 +338,21 @@ public class AuctionHttpServer implements EgressListener
 
             // Launch keep-alive thread
             new Thread(() -> {
-                try {
-                    while (true) {
-                        aeronCluster.pollEgress();
+                final long keepAliveIntervalNanos = TimeUnit.SECONDS.toNanos(3); // send every 3 second
+                long lastKeepAliveTime = System.nanoTime();
+
+                while (!Thread.currentThread().isInterrupted()) {
+                    int fragments = aeronCluster.pollEgress();
+
+                    long now = System.nanoTime();
+                    if (now - lastKeepAliveTime >= keepAliveIntervalNanos) {
                         aeronCluster.sendKeepAlive();
-                        Thread.sleep(1000);
+                        lastKeepAliveTime = now;
                     }
-                } catch (InterruptedException e) {
-                    System.err.println("Keep-alive thread interrupted.");
+
+                    if (fragments == 0) {
+                        LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(50));
+                    } 
                 }
             }, "Aeron-KeepAlive-Thread").start();
 
