@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.HashMap;
 
 import java.util.Objects;
+import java.util.Arrays;
 
 /**
  * Auction service implementing the business logic.
@@ -87,7 +88,7 @@ public class BasicAuctionClusteredService implements ClusteredService
         final long itemId = buffer.getLong(offset + ITEM_ID_OFFSET);
         final long price = buffer.getLong(offset + PRICE_OFFSET);
 
-        System.out.printf("[onSessionMessage] Received correlationId=%d for itemId=%d, price=%d%n", correlationId, itemId, price);
+        // System.out.printf("[onSessionMessage] Received correlationId=%d for itemId=%d, price=%d%n", correlationId, itemId, price);
         if (price == -1)
         { // This is a read request
             egressMessageBuffer.putLong(CORRELATION_ID_OFFSET, correlationId);
@@ -126,19 +127,15 @@ public class BasicAuctionClusteredService implements ClusteredService
     // tag::takeSnapshot[]
     public void onTakeSnapshot(final ExclusivePublication snapshotPublication)
     {
-        snapshotBuffer.putInt(0, auction.itemBestPrices.size());
-        int snapshotOffset = BitUtil.SIZE_OF_INT;
-        for (Map.Entry<Long, Long> entry : auction.itemBestPrices.entrySet())
-        {
-            snapshotBuffer.putLong(snapshotOffset, entry.getKey());
-            snapshotOffset += BitUtil.SIZE_OF_LONG;
-            snapshotBuffer.putLong(snapshotOffset, entry.getValue());
-            snapshotOffset += BitUtil.SIZE_OF_LONG;
+        snapshotBuffer.putInt(0, auction.getSize()); // Always 10
+        int offset = BitUtil.SIZE_OF_INT;
+        for (int i = 0; i < auction.getSize(); i++) {
+            snapshotBuffer.putLong(offset, auction.getBestPrice(i));
+            offset += BitUtil.SIZE_OF_LONG;
         }
 
         idleStrategy.reset();
-        while (snapshotPublication.offer(snapshotBuffer, 0, snapshotOffset) < 0)            // <2>
-        {
+        while (snapshotPublication.offer(snapshotBuffer, 0, offset) < 0) {
             idleStrategy.idle();
         }
     }
@@ -149,45 +146,27 @@ public class BasicAuctionClusteredService implements ClusteredService
     {
         System.out.println("[loadSnapshot]");
         final MutableBoolean isAllDataLoaded = new MutableBoolean(false);
-        final FragmentHandler fragmentHandler = (buffer, offset, length, header) ->         // <1>
-        {
-            System.out.println("[loadSnapshot] Fragment received:");
-            System.out.println("    Buffer Length: " + length);
-            System.out.println("    Offset: " + offset);
-
-            final int itemCount = buffer.getInt(offset);
-            System.out.println("    Item Count: " + itemCount);
+        final FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
+            final int count = buffer.getInt(offset);
             offset += BitUtil.SIZE_OF_INT;
-            for (int i = 0; i < itemCount; i++)
-            {
-                final long itemId = buffer.getLong(offset);
-                System.out.println("    Item ID: " + itemId);
+            for (int i = 0; i < count; i++) {
+                auction.loadInitialState((long) i, buffer.getLong(offset));
                 offset += BitUtil.SIZE_OF_LONG;
-                final long price = buffer.getLong(offset);
-                System.out.println("    Price: " + price);
-                offset += BitUtil.SIZE_OF_LONG;
-                auction.loadInitialState(itemId, price);
             }
-
             isAllDataLoaded.set(true);
-            System.out.println("[loadSnapshot] Finished parsing fragment.");
         };
 
-        while (!snapshotImage.isEndOfStream())                                              // <4>
-        {
+        while (!snapshotImage.isEndOfStream()) {
             final int fragmentsPolled = snapshotImage.poll(fragmentHandler, 1);
 
-            if (isAllDataLoaded.value)                                                      // <5>
-            {
-                System.out.println("[loadSnapshot] All data loaded from snapshot fragment.");
+            if (isAllDataLoaded.value) {
                 break;
             }
 
-            idleStrategy.idle(fragmentsPolled);                                             // <6>
+            idleStrategy.idle(fragmentsPolled);
         }
 
-        System.out.println("[loadSnapshot] Snapshot load complete.");
-        assert snapshotImage.isEndOfStream();                                               // <7>
+        assert snapshotImage.isEndOfStream();
         assert isAllDataLoaded.value;
     }
     // end::loadSnapshot[]
@@ -211,7 +190,7 @@ public class BasicAuctionClusteredService implements ClusteredService
      */
     public void onSessionOpen(final ClientSession session, final long timestamp)
     {
-        System.out.println("onSessionOpen(" + session + ")");
+        // System.out.println("onSessionOpen(" + session + ")");
     }
 
     /**
@@ -231,31 +210,51 @@ public class BasicAuctionClusteredService implements ClusteredService
 
     static class Auction
     {
-        private final Map<Long, Long> itemBestPrices = new HashMap<>();
+        // private final Map<Long, Long> itemBestPrices = new HashMap<>();
+        private final long[] bestPrices = new long[10];
 
         void loadInitialState(final long itemId, final long price)
         {
-            itemBestPrices.put(itemId, price);
+            if (itemId >= 0 && itemId < bestPrices.length) {
+                bestPrices[(int) itemId] = price;
+            }
+        }
+
+        long[] getBestPrices()
+        {
+            return bestPrices;
+        }
+
+        int getSize()
+        {
+            return bestPrices.length;
         }
 
         boolean attemptBid(final long price, final long itemId)
         {
-            System.out.println("attemptBid(this=" + this + ", itemId=" + itemId + ", price=" + price + ")");
-
-            final long bestPrice = itemBestPrices.getOrDefault(itemId, 0L);
-
-            if (price <= bestPrice)
-            {
+            if (itemId < 0 || itemId >= bestPrices.length) {
+                System.err.println("Invalid itemId: " + itemId);
                 return false;
             }
 
-            itemBestPrices.put(itemId, price);
+            final int index = (int) itemId;
+            final long currentPrice = bestPrices[index];
+
+            if (price <= currentPrice) {
+                return false;
+            }
+
+            bestPrices[index] = price;
             return true;
         }
 
         long getBestPrice(final long itemId)
         {
-            return itemBestPrices.getOrDefault(itemId, 0L);
+            if (itemId < 0 || itemId >= bestPrices.length) {
+                System.err.println("Invalid itemId: " + itemId);
+                return 0;
+            }
+            return bestPrices[(int) itemId];
         }
 
         /**
@@ -274,16 +273,15 @@ public class BasicAuctionClusteredService implements ClusteredService
             }
 
             final Auction auction = (Auction) o;
-            return Objects.equals(itemBestPrices, auction.itemBestPrices);
+            return Arrays.equals(bestPrices, auction.bestPrices);
         }
-
 
         /**
          * {@inheritDoc}
          */
         public int hashCode()
         {
-            return Objects.hash(itemBestPrices);
+            return Arrays.hashCode(bestPrices);
         }
 
         /**
@@ -292,7 +290,7 @@ public class BasicAuctionClusteredService implements ClusteredService
         public String toString()
         {
             return "Auction{" +
-                "itemBestPrices=" + itemBestPrices +
+                "bestPrices=" + bestPrices +
                 '}';
         }
     }
@@ -331,7 +329,7 @@ public class BasicAuctionClusteredService implements ClusteredService
     public String toString()
     {
         return "BasicAuctionClusteredService{" +
-            "auction=" + auction +
+            "auction=" + Arrays.toString(auction.getBestPrices()) +
             '}';
     }
 }

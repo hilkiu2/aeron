@@ -123,7 +123,7 @@ public class AuctionHttpServer implements EgressListener
 
         CompletableFuture<Map<String, Object>> future = pendingResponses.get(correlationId);
         if (future != null) {
-            System.out.printf("[MATCH] Completing future for correlationId=%d%n", correlationId);
+            // System.out.printf("[MATCH] Completing future for correlationId=%d%n", correlationId);
             Map<String, Object> result = new HashMap<>();
             result.put("itemId", itemId);
             result.put("price", currentWinningPrice);
@@ -134,10 +134,10 @@ public class AuctionHttpServer implements EgressListener
             System.out.printf("[WARN] No future found for correlationId=%d! Possible race or double complete.%n", correlationId);
         }
 
-        printOutput(
-            "OnMessage: { Cluster Session Id: " + clusterSessionId + ", Correlation Id: " + correlationId +
-            ", Item Id: " + itemId + ", Current Winning Price: " + currentWinningPrice +
-            ", Succeed: " + success + " }");
+        // printOutput(
+        //     "OnMessage: { Cluster Session Id: " + clusterSessionId + ", Correlation Id: " + correlationId +
+        //     ", Item Id: " + itemId + ", Current Winning Price: " + currentWinningPrice +
+        //     ", Succeed: " + success + " }");
     }
 
     /**
@@ -151,10 +151,10 @@ public class AuctionHttpServer implements EgressListener
         final EventCode code,
         final String detail)
     {
-        printOutput(
-            "onSessionEvent: { Correlation Id: " + correlationId +
-            ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId +
-            ", Code: " + code + ", Detail: " + detail + " }");
+        // printOutput(
+        //     "onSessionEvent: { Correlation Id: " + correlationId +
+        //     ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId +
+        //     ", Code: " + code + ", Detail: " + detail + " }");
     }
 
     /**
@@ -167,9 +167,9 @@ public class AuctionHttpServer implements EgressListener
         final String ingressEndpoints)
     {
         
-        printOutput(
-            "onNewLeader: { Cluster Session Id: " + clusterSessionId +
-            ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId + "}");
+        // printOutput(
+        //     "onNewLeader: { Cluster Session Id: " + clusterSessionId +
+        //     ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId + "}");
     }
     // end::response[]
 
@@ -216,7 +216,7 @@ public class AuctionHttpServer implements EgressListener
                     Map<String, Object> result = future.getNow(null);
                     responseMap.remove(corrId);
                     res.status(200);
-                    System.out.printf("[RESPONSE] correlationId=%d | result=%s%n", corrId, result);
+                    // System.out.printf("[RESPONSE] correlationId=%d | result=%s%n", corrId, result);
 
                     Map<String, Object> wrappedResult = new HashMap<>();
                     wrappedResult.put("status", "OK");
@@ -226,7 +226,7 @@ public class AuctionHttpServer implements EgressListener
                 } catch (Exception e) {
                     responseMap.remove(corrId);
                     res.status(500);
-                    System.err.println("    Future failed for correlationId: " + corrId + ", error: " + e.getMessage());
+                    // System.err.println("    Future failed for correlationId: " + corrId + ", error: " + e.getMessage());
 
                     return new Gson().toJson(Map.of("status", "ERROR", "message", e.getMessage()));
                 }
@@ -234,7 +234,7 @@ public class AuctionHttpServer implements EgressListener
             if (System.nanoTime() - start > maxWaitNanos) {
                 responseMap.remove(corrId);
                 res.status(504);
-                System.err.printf("     [TIMEOUT] correlationId=%d, pendingResponses.size()=%d%n", corrId, responseMap.size());
+                // System.err.printf("     [TIMEOUT] correlationId=%d, pendingResponses.size()=%d%n", corrId, responseMap.size());
 
                 return new Gson().toJson(Map.of("status", "ERROR", "message", "Timeout waiting for cluster response"));
             }
@@ -293,7 +293,7 @@ public class AuctionHttpServer implements EgressListener
         int attempts = 0;
         long result;
 
-        System.out.printf("Sending request: correlationId=%d%n", corrId);
+        // System.out.printf("Sending request: correlationId=%d%n", corrId);
 
         while (true)
         {
@@ -309,7 +309,7 @@ public class AuctionHttpServer implements EgressListener
 
             if (result > 0)
             {
-                System.out.printf("[OFFER SUCCESS] correlationId=%d, result=%d after %d attempts%n", corrId, result, attempts);
+                // System.out.printf("[OFFER SUCCESS] correlationId=%d, result=%d after %d attempts%n", corrId, result, attempts);
                 return true;
             }
 
@@ -345,7 +345,7 @@ public class AuctionHttpServer implements EgressListener
 
             if (++attempts > 10000)
             {
-                System.err.printf("[OFFER FAILED] correlationId=%d after 10000 attempts%n", corrId);
+                // System.err.printf("[OFFER FAILED] correlationId=%d after 10000 attempts%n", corrId);
                 pendingResponses.remove(corrId);
                 res.status(500);
                 return false;
@@ -360,7 +360,7 @@ public class AuctionHttpServer implements EgressListener
         port(8081);
 
         post("/bid", (req, res) -> {
-            System.out.printf("...post/bid itemId=%s, price=%s%n", req.queryParams("itemId"), req.queryParams("price"));
+            // System.out.printf("...post/bid itemId=%s, price=%s%n", req.queryParams("itemId"), req.queryParams("price"));
 
             if (aeronCluster == null) {
                 System.err.println("Aeron not connected. Aborting HTTP server.");
@@ -411,7 +411,7 @@ public class AuctionHttpServer implements EgressListener
         });
 
         get("/item", (req, res) -> {
-            System.out.printf("...get/item itemId=%s%n", req.queryParams("itemId"));
+            // System.out.printf("...get/item itemId=%s%n", req.queryParams("itemId"));
 
             res.type("application/json");
             res.header("Content-Type", "application/json");
@@ -505,12 +505,12 @@ public class AuctionHttpServer implements EgressListener
      */
     public static void main(final String[] args)
     {
-        System.out.println("Beginning AuctionHttpServer");
+        // System.out.println("Beginning AuctionHttpServer");
         final String[] hostnames = System.getProperty(
             "aeron.cluster.tutorial.hostnames", "localhost,localhost,localhost").split(",");
         final String ingressEndpoints = ingressEndpoints(Arrays.asList(hostnames));
 
-        System.out.println("Creating client");
+        // System.out.println("Creating client");
         final AuctionHttpServer client = new AuctionHttpServer();
 
        String hostname = "unknown";
@@ -526,7 +526,7 @@ public class AuctionHttpServer implements EgressListener
             nodeId = hostname.replaceAll(".*node(\\d+).*", "$1");
         }
         final String aeronDir = CommonContext.getAeronDirectoryName() + "-" + nodeId + "-driver";
-        System.out.println("Aeron directory: " + aeronDir);
+        // System.out.println("Aeron directory: " + aeronDir);
 
         // Start HTTP server to control Aeron bidding
         client.connect(aeronDir, ingressEndpoints);
