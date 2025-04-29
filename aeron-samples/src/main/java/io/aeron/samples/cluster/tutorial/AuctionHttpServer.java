@@ -103,7 +103,7 @@ public class AuctionHttpServer implements EgressListener
 
         this.winningCustomerId = winningCustomerId;
         this.winningPrice = currentWinningPrice;
-        LOG.info("got from server corrId={}", correlationId);
+        // LOG.info("got from server corrId={}", correlationId);
         CompletableFuture<Boolean> future = pendingResponses.get(correlationId);
         if (future != null) {
             // System.out.printf("[MATCH] Completing future for correlationId=%d%n", correlationId);
@@ -252,11 +252,6 @@ public class AuctionHttpServer implements EgressListener
             final CompletableFuture<Boolean> resultFuture = new CompletableFuture<>();
             pendingResponses.put(corrId, resultFuture);
 
-            // Log if too many responses are waiting
-            if (pendingResponses.size() > 100) {
-                System.err.printf("⚠️⚠️⚠️ Too many unacknowledged bids! (%d pending)%n", pendingResponses.size());
-            }
-
             final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
             buffer.putLong(CORRELATION_ID_OFFSET, corrId);
             buffer.putLong(CUSTOMER_ID_OFFSET, cid);
@@ -271,7 +266,7 @@ public class AuctionHttpServer implements EgressListener
                 // synchronized (aeronLock)
                 // {
                 result = clusterRef.offer(aeronBuffer, 0, buffer.capacity());
-                LOG.info("submitted to server corrId={} customerId={} price={}", corrId, customerIdStr, priceStr);
+                // LOG.info("submitted to server corrId={} customerId={} price={}", corrId, customerIdStr, priceStr);
                 // }
                 if (result > 0) {
                     break;
@@ -319,6 +314,7 @@ public class AuctionHttpServer implements EgressListener
                                 .aeronDirectoryName(aeronDir)
                                 .ingressChannel("aeron:udp")
                                 .ingressEndpoints(ingressEndpoints)
+                                .isIngressExclusive(false)
                 );
 
                 this.aeronCluster = newCluster;

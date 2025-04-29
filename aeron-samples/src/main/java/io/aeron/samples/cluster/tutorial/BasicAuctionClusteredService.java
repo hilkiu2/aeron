@@ -91,7 +91,7 @@ public class BasicAuctionClusteredService implements ClusteredService
             final Header header) {
 
         final long correlationId = buffer.getLong(offset + CORRELATION_ID_OFFSET);                   // <1>
-        LOG.info("Received message from session: {} corrId {}", session.id(), correlationId);
+        // LOG.info("Received message from session: {} corrId {}", session.id(), correlationId);
         final long customerId = buffer.getLong(offset + CUSTOMER_ID_OFFSET);
         final long price = buffer.getLong(offset + PRICE_OFFSET);
 
