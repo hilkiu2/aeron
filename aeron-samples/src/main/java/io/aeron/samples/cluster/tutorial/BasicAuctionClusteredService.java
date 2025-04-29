@@ -98,9 +98,16 @@ public class BasicAuctionClusteredService implements ClusteredService
             egressMessageBuffer.putByte(BID_SUCCEEDED_OFFSET, bidSucceeded ? (byte)1 : (byte)0);
 
             idleStrategy.reset();
+            int tries = 0;
             while (session.offer(egressMessageBuffer, 0, EGRESS_MESSAGE_LENGTH) < 0)                 // <5>
             {
-                idleStrategy.idle();                                                                 // <6>
+                idleStrategy.idle();  
+                tries++;
+                if (tries > 1000) // pick a reasonable number
+                {
+                    System.err.println("⚠️ Giving up on reply after 1000 attempts! Correlation ID: " + correlationId + ", Customer ID: " + customerId + ", Price: " + price);
+                    break;
+                }
             }
         }
     }
@@ -175,7 +182,7 @@ public class BasicAuctionClusteredService implements ClusteredService
      */
     public void onSessionOpen(final ClientSession session, final long timestamp)
     {
-        System.out.println("onSessionOpen(" + session + ")");
+        // System.out.println("onSessionOpen(" + session + ")");
     }
 
     /**
@@ -183,7 +190,7 @@ public class BasicAuctionClusteredService implements ClusteredService
      */
     public void onSessionClose(final ClientSession session, final long timestamp, final CloseReason closeReason)
     {
-        System.out.println("onSessionClose(" + session + ")");
+        // System.out.println("onSessionClose(" + session + ")");
     }
 
     /**
@@ -206,7 +213,7 @@ public class BasicAuctionClusteredService implements ClusteredService
 
         boolean attemptBid(final long price, final long customerId)
         {
-            System.out.println("attemptBid(this=" + this + ", price=" + price + ",customerId=" + customerId + ")");
+            // System.out.println("attemptBid(this=" + this + ", price=" + price + ",customerId=" + customerId + ")");
 
             if (price <= bestPrice)
             {
