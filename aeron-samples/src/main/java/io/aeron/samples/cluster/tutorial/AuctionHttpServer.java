@@ -351,7 +351,7 @@ public class AuctionHttpServer implements EgressListener
                 return false;
             }
 
-            LockSupport.parkNanos(100_000); // Pause briefly before retrying
+            LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(50));
         }
     }
 
@@ -470,6 +470,7 @@ public class AuctionHttpServer implements EgressListener
                     .aeronDirectoryName(aeronDir)
                     .ingressChannel("aeron:udp")
                     .ingressEndpoints(ingressEndpoints)
+                    .isIngressExclusive(false)
             );
 
             // Launch keep-alive thread
@@ -487,7 +488,7 @@ public class AuctionHttpServer implements EgressListener
                     }
 
                     if (fragments == 0) {
-                        LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(10));
+                        LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(5));
                     } 
                 }
             }, "Aeron-KeepAlive-Thread").start();
