@@ -294,7 +294,6 @@ public class AuctionHttpServer implements EgressListener
         long result;
 
         // System.out.printf("Sending request: correlationId=%d%n", corrId);
-
         while (true)
         {
             if (isReconnecting.get()) {
@@ -350,7 +349,6 @@ public class AuctionHttpServer implements EgressListener
                 res.status(500);
                 return false;
             }
-
             LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(50));
         }
     }
@@ -393,11 +391,6 @@ public class AuctionHttpServer implements EgressListener
             final long corrId = correlationId.incrementAndGet(); 
             final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
             pendingResponses.put(corrId, resultFuture);
-
-            // Log if too many responses are waiting
-            if (pendingResponses.size() > 100) {
-                System.err.printf("⚠️⚠️⚠️ Too many unacknowledged bids! (%d pending)%n", pendingResponses.size());
-            }
 
             final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
             buffer.putLong(CORRELATION_ID_OFFSET, corrId);
