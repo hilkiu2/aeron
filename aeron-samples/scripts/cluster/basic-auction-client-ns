@@ -30,7 +30,7 @@ function startNode() {
         -XX:+UnlockDiagnosticVMOptions \
         -XX:GuaranteedSafepointInterval=300000 \
         -XX:+UseParallelGC \
-        -Daeron.cluster.tutorial.customerId="${1}" \
+        -Daeron.cluster.tutorial.itemId="${1}" \
         -Daeron.cluster.tutorial.numOfBids="${2}" \
         -Daeron.cluster.tutorial.bidIntervalMs="${3}" \
         -Daeron.cluster.tutorial.hostnames=10.42.0.10,10.42.0.11,10.42.0.12 \
@@ -39,14 +39,14 @@ function startNode() {
 }
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: ./basic-action-client <customer id> [number of bids (default 10)] [bid interval ms (default 1000)]"
+  echo "Usage: ./basic-action-client <item id> [number of bids (default 10)] [bid interval ms (default 1000)]"
   exit 1
 fi
 
-CUSTOMER_ID=${1}
+ITEM_ID=${1}
 NUM_OF_BIDS=${2:-10}
 BID_INTERVAL_MS=${3:-1000}
 
-startNode ${CUSTOMER_ID} ${NUM_OF_BIDS} ${BID_INTERVAL_MS}
+startNode ${ITEM_ID} ${NUM_OF_BIDS} ${BID_INTERVAL_MS}
 # end::start_jvm[]
 

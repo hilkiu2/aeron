@@ -267,7 +267,9 @@ public final class SingleNodeCluster implements AutoCloseable
     public SingleNodeCluster(final ClusteredService externalService, final boolean isCleanStart)
     {
         final ClusteredService service = null == externalService ? new SingleNodeCluster.Service() : externalService;
+        // Arrays.asList("10.200.1.2", "10.200.1.3", "10.200.1.4")
         config = ClusterConfig.create(0, Collections.singletonList("localhost"), PORT_BASE, service);
+        // config = ClusterConfig.create(0, Collections.singletonList("10.200.1.2"), PORT_BASE, service);
 
         config.mediaDriverContext().dirDeleteOnStart(true);
         config.archiveContext().deleteArchiveOnStart(isCleanStart);
@@ -317,6 +319,7 @@ public final class SingleNodeCluster implements AutoCloseable
                 .ingressChannel("aeron:udp")
                 .ingressEndpoints(ingressEndpoints(
                     Collections.singletonList(config.ingressHostname()), PORT_BASE, CLIENT_FACING_PORT_OFFSET)));
+                    // Arrays.asList("10.200.1.2", "10.200.1.3", "10.200.1.4"), PORT_BASE, CLIENT_FACING_PORT_OFFSET)));
     }
 
     void sendMessageToCluster(final int id, final int messageLength)

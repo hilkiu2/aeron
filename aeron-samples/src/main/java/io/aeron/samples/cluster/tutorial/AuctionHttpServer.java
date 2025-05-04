@@ -134,7 +134,7 @@ public class AuctionHttpServer implements EgressListener
             System.out.printf("[WARN] No future found for correlationId=%d! Possible race or double complete.%n", correlationId);
         }
 
-        // printOutput(
+        // System.out.println(
         //     "OnMessage: { Cluster Session Id: " + clusterSessionId + ", Correlation Id: " + correlationId +
         //     ", Item Id: " + itemId + ", Current Winning Price: " + currentWinningPrice +
         //     ", Succeed: " + success + " }");
@@ -151,10 +151,10 @@ public class AuctionHttpServer implements EgressListener
         final EventCode code,
         final String detail)
     {
-        // printOutput(
-        //     "onSessionEvent: { Correlation Id: " + correlationId +
-        //     ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId +
-        //     ", Code: " + code + ", Detail: " + detail + " }");
+        System.out.println(
+            "onSessionEvent: { Correlation Id: " + correlationId +
+            ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId +
+            ", Code: " + code + ", Detail: " + detail + " }");
     }
 
     /**
@@ -166,10 +166,9 @@ public class AuctionHttpServer implements EgressListener
         final int leaderMemberId,
         final String ingressEndpoints)
     {
-        
-        // printOutput(
-        //     "onNewLeader: { Cluster Session Id: " + clusterSessionId +
-        //     ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId + "}");
+        System.out.println(
+            "onNewLeader: { Cluster Session Id: " + clusterSessionId +
+            ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId + "}");
     }
     // end::response[]
 
@@ -195,11 +194,6 @@ public class AuctionHttpServer implements EgressListener
         return sb.toString();
     }
 
-    private void printOutput(final String message)
-    {
-        System.out.println(message);
-    }
-
     private String waitForFuture(
         CompletableFuture<Map<String, Object>> future, 
         long corrId, 
@@ -207,7 +201,7 @@ public class AuctionHttpServer implements EgressListener
         Response res
     ) {
         long start = System.nanoTime();
-        long maxWaitNanos = TimeUnit.SECONDS.toNanos(2);
+        long maxWaitNanos = TimeUnit.SECONDS.toNanos(20);
         long sleepNanos = TimeUnit.MILLISECONDS.toNanos(5); // tiny sleeps between polls
 
         while (true) {
@@ -242,119 +236,123 @@ public class AuctionHttpServer implements EgressListener
         }
     }
 
-    private synchronized void reconnectCluster()
-    {
-        try
-        {
-            if (isReconnecting.get()) {
-                return;
-            }
+    // private synchronized void reconnectCluster()
+    // {
+    //     try
+    //     {
+    //         if (isReconnecting.get()) {
+    //             return;
+    //         }
 
-            isReconnecting.set(true);
+    //         isReconnecting.set(true);
 
-            System.out.println("[RECONNECT] Closing old AeronCluster connection...");
-            if (aeronCluster != null)
-            {
-                aeronCluster.close();
-            }
-        }
-        catch (Exception e)
-        {
-            System.err.println("[RECONNECT] Error closing old AeronCluster: " + e.getMessage());
-        }
+    //         System.out.println("[RECONNECT] Closing old AeronCluster connection...");
+    //         if (aeronCluster != null)
+    //         {
+    //             aeronCluster.close();
+    //         }
+    //     }
+    //     catch (Exception e)
+    //     {
+    //         System.err.println("[RECONNECT] Error closing old AeronCluster: " + e.getMessage());
+    //     }
 
-        try
-        {
-            System.out.println("[RECONNECT] Creating new AeronCluster connection...");
-            this.aeronCluster = AeronCluster.connect(
-                new AeronCluster.Context()
-                    .egressListener(this)
-                    .egressChannel("aeron:udp?endpoint=localhost:0")
-                    .aeronDirectoryName(this.aeronCluster.context().aeronDirectoryName())
-                    .ingressChannel("aeron:udp")
-                    .ingressEndpoints(this.aeronCluster.context().ingressEndpoints())
-            );
-            System.out.println("[RECONNECT] New AeronCluster connection established!");
-        }
-        catch (Exception e)
-        {
-            System.err.println("[RECONNECT] Failed to reconnect to Aeron cluster: " + e.getMessage());
-            e.printStackTrace();
-        }
-        finally
-        {
-            isReconnecting.set(false);
-        }
-    }
-
+    //     try
+    //     {
+    //         System.out.println("[RECONNECT] Creating new AeronCluster connection...");
+    //         this.aeronCluster = AeronCluster.connect(
+    //             new AeronCluster.Context()
+    //                 .egressListener(this)
+    //                 .egressChannel("aeron:udp?endpoint=localhost:0")
+    //                 .aeronDirectoryName(this.aeronCluster.context().aeronDirectoryName())
+    //                 .ingressChannel("aeron:udp")
+    //                 .ingressEndpoints(this.aeronCluster.context().ingressEndpoints())
+    //         );
+    //         System.out.println("[RECONNECT] New AeronCluster connection established!");
+    //     }
+    //     catch (Exception e)
+    //     {
+    //         System.err.println("[RECONNECT] Failed to reconnect to Aeron cluster: " + e.getMessage());
+    //         e.printStackTrace();
+    //     }
+    //     finally
+    //     {
+    //         isReconnecting.set(false);
+    //     }
+    // }
 
     private boolean offerWithRetries(DirectBuffer buffer, int length, long corrId, Response res)
     {
-        int attempts = 0;
-        long result;
-
-        // System.out.printf("Sending request: correlationId=%d%n", corrId);
-        while (true)
+        idleStrategy.reset();
+        while (aeronCluster.offer(buffer, 0, length) < 0)
         {
-            if (isReconnecting.get()) {
-                // Wait for reconnect to complete
-                for (int i = 0; i < 100; i++) {
-                    if (!isReconnecting.get()) break;
-                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5)); // wait 5ms
-                }
-            }
-            
-            result = aeronCluster.offer(buffer, 0, length);
-
-            if (result > 0)
-            {
-                // System.out.printf("[OFFER SUCCESS] correlationId=%d, result=%d after %d attempts%n", corrId, result, attempts);
-                return true;
-            }
-
-            if (result == Publication.NOT_CONNECTED)
-            {
-                System.err.printf("[OFFER FAIL] correlationId=%d: NOT_CONNECTED (-1)%n", corrId);
-            }
-            else if (result == Publication.CLOSED)
-            {
-                System.err.printf("[OFFER FAIL] correlationId=%d: CLOSED (-2). Reconnecting...%n", corrId);
-                reconnectCluster();
-                pendingResponses.remove(corrId);
-                res.status(500);
-                return false;
-            }
-            else if (result == Publication.MAX_POSITION_EXCEEDED)
-            {
-                System.err.printf("[OFFER FAIL] correlationId=%d: MAX_POSITION_EXCEEDED (-3)%n", corrId);
-            }
-            else if (result == 0)
-            {
-                // Backpressure: OK to retry
-                if (attempts % 100 == 0) {
-                    System.err.printf("[OFFER FAIL] correlationId=%d: BACKPRESSURE (0) after %d attempts%n", corrId, attempts);
-                }
-            }
-            else
-            {
-                System.err.printf("[OFFER FAIL] correlationId=%d: UNKNOWN ERROR (result=%d)%n", corrId, result);
-            }
-
-            
-
-            if (++attempts > 10000)
-            {
-                // System.err.printf("[OFFER FAILED] correlationId=%d after 10000 attempts%n", corrId);
-                pendingResponses.remove(corrId);
-                res.status(500);
-                return false;
-            }
-            LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(50));
+            idleStrategy.idle(aeronCluster.pollEgress());
         }
+        return true;
+
+        // int attempts = 0;
+        // long result;
+
+        // // System.out.printf("Sending request: correlationId=%d%n", corrId);
+        // while (true)
+        // {
+        //     if (isReconnecting.get()) {
+        //         // Wait for reconnect to complete
+        //         for (int i = 0; i < 100; i++) {
+        //             if (!isReconnecting.get()) break;
+        //             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5)); // wait 5ms
+        //         }
+        //     }
+            
+        //     result = aeronCluster.offer(buffer, 0, length);
+
+        //     if (result > 0)
+        //     {
+        //         // System.out.printf("[OFFER SUCCESS] correlationId=%d, result=%d after %d attempts%n", corrId, result, attempts);
+        //         return true;
+        //     }
+
+        //     if (result == Publication.NOT_CONNECTED)
+        //     {
+        //         System.err.printf("[OFFER FAIL] correlationId=%d: NOT_CONNECTED (-1)%n", corrId);
+        //     }
+        //     else if (result == Publication.CLOSED)
+        //     {
+        //         System.err.printf("[OFFER FAIL] correlationId=%d: CLOSED (-2). Reconnecting (not actually)...%n", corrId);
+        //         // reconnectCluster();
+        //         pendingResponses.remove(corrId);
+        //         res.status(500);
+        //         return false;
+        //     }
+        //     else if (result == Publication.MAX_POSITION_EXCEEDED)
+        //     {
+        //         System.err.printf("[OFFER FAIL] correlationId=%d: MAX_POSITION_EXCEEDED (-3)%n", corrId);
+        //     }
+        //     else if (result == 0)
+        //     {
+        //         // Backpressure: OK to retry
+        //         if (attempts % 100 == 0) {
+        //             System.err.printf("[OFFER FAIL] correlationId=%d: BACKPRESSURE (0) after %d attempts%n", corrId, attempts);
+        //         }
+        //     }
+        //     else
+        //     {
+        //         System.err.printf("[OFFER FAIL] correlationId=%d: UNKNOWN ERROR (result=%d)%n", corrId, result);
+        //     }
+
+        //     if (++attempts > 10000)
+        //     {
+        //         // System.err.printf("[OFFER FAILED] correlationId=%d after 10000 attempts%n", corrId);
+        //         pendingResponses.remove(corrId);
+        //         res.status(500);
+        //         return false;
+        //     }
+        //     LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(50));
+        // }
     }
 
-
     public void startHttpServer() {
+        ipAddress("0.0.0.0");
         port(8081);
 
         post("/bid", (req, res) -> {
@@ -454,13 +452,20 @@ public class AuctionHttpServer implements EgressListener
         });
     }
 
-    public void connect(String aeronDir, String ingressEndpoints) {
+    public void connect(String ingressEndpoints) {
         try {
+            MediaDriver mediaDriver = MediaDriver.launchEmbedded(new MediaDriver.Context()
+                .threadingMode(ThreadingMode.SHARED)
+                .dirDeleteOnStart(true)
+                .dirDeleteOnShutdown(true));
+
+            System.out.println("Ingress endpoints: " + ingressEndpoints);
             this.aeronCluster = AeronCluster.connect(
                 new AeronCluster.Context()
                     .egressListener(this)
-                    .egressChannel("aeron:udp?endpoint=localhost:0")
-                    .aeronDirectoryName(aeronDir)
+                    // .egressChannel("aeron:udp?endpoint=localhost:0")
+                    .egressChannel("aeron:udp?endpoint=10.200.1.1:0")
+                    .aeronDirectoryName(mediaDriver.aeronDirectoryName())
                     .ingressChannel("aeron:udp")
                     .ingressEndpoints(ingressEndpoints)
                     .isIngressExclusive(false)
@@ -468,7 +473,7 @@ public class AuctionHttpServer implements EgressListener
 
             // Launch keep-alive thread
             new Thread(() -> {
-                final long keepAliveIntervalNanos = TimeUnit.SECONDS.toNanos(1); // send every 3 second
+                final long keepAliveIntervalNanos = TimeUnit.SECONDS.toNanos(1); // send every 1 second
                 long lastKeepAliveTime = System.nanoTime();
 
                 while (!Thread.currentThread().isInterrupted()) {
@@ -507,23 +512,7 @@ public class AuctionHttpServer implements EgressListener
         // System.out.println("Creating client");
         final AuctionHttpServer client = new AuctionHttpServer();
 
-       String hostname = "unknown";
-        try {
-            hostname = InetAddress.getLocalHost().getHostName();
-        } catch (UnknownHostException e) {
-            System.err.println("Failed to resolve local hostname:");
-            e.printStackTrace();
-        }
-        String nodeId = "1";
-        if (hostname.matches(".*node(\\d+).*"))
-        {
-            nodeId = hostname.replaceAll(".*node(\\d+).*", "$1");
-        }
-        final String aeronDir = CommonContext.getAeronDirectoryName() + "-" + nodeId + "-driver";
-        // System.out.println("Aeron directory: " + aeronDir);
-
-        // Start HTTP server to control Aeron bidding
-        client.connect(aeronDir, ingressEndpoints);
+        client.connect(ingressEndpoints);
         client.startHttpServer();
 
         // Keep Aeron running

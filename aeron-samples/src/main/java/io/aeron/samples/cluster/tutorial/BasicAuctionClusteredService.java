@@ -127,6 +127,7 @@ public class BasicAuctionClusteredService implements ClusteredService
     // tag::takeSnapshot[]
     public void onTakeSnapshot(final ExclusivePublication snapshotPublication)
     {
+        System.out.println("onTakeSnapshot(snapshotPublication: " + snapshotPublication + ")");
         snapshotBuffer.putInt(0, auction.getSize()); // Always 10
         int offset = BitUtil.SIZE_OF_INT;
         for (int i = 0; i < auction.getSize(); i++) {
@@ -144,7 +145,7 @@ public class BasicAuctionClusteredService implements ClusteredService
     // tag::loadSnapshot[]
     private void loadSnapshot(final Cluster cluster, final Image snapshotImage)
     {
-        System.out.println("[loadSnapshot]");
+        System.out.println("onLoadSnapshot(snapshotImage: " + snapshotImage + ")");
         final MutableBoolean isAllDataLoaded = new MutableBoolean(false);
         final FragmentHandler fragmentHandler = (buffer, offset, length, header) -> {
             final int count = buffer.getInt(offset);
@@ -176,6 +177,7 @@ public class BasicAuctionClusteredService implements ClusteredService
      */
     public void onRoleChange(final Cluster.Role newRole)
     {
+        System.out.println("onRoleChange(newRole: " + newRole + ")");
     }
 
     /**
@@ -183,6 +185,7 @@ public class BasicAuctionClusteredService implements ClusteredService
      */
     public void onTerminate(final Cluster cluster)
     {
+        System.out.println("onTerminate(clutster: " + cluster + ")");
     }
 
     /**
@@ -190,7 +193,7 @@ public class BasicAuctionClusteredService implements ClusteredService
      */
     public void onSessionOpen(final ClientSession session, final long timestamp)
     {
-        // System.out.println("onSessionOpen(" + session + ")");
+        System.out.println("onSessionClose(timestamp: " + timestamp + ", session: " + session + ")");
     }
 
     /**
@@ -198,7 +201,7 @@ public class BasicAuctionClusteredService implements ClusteredService
      */
     public void onSessionClose(final ClientSession session, final long timestamp, final CloseReason closeReason)
     {
-        System.out.println("onSessionClose(session: " + session + ", reason: " + closeReason + ")");
+        System.out.println("onSessionClose(timestamp: " + timestamp + ", session: " + session + ", reason: " + closeReason + ")");
     }
 
     /**
@@ -206,6 +209,7 @@ public class BasicAuctionClusteredService implements ClusteredService
      */
     public void onTimerEvent(final long correlationId, final long timestamp)
     {
+        System.out.println("onTimerEvent(timestamp: " + timestamp + ", correlationId: " + correlationId + ")");
     }
 
     static class Auction
