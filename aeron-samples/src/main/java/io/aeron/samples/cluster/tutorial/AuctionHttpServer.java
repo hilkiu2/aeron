@@ -65,6 +65,7 @@ import org.agrona.concurrent.IdleStrategy;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.time.Instant;
 
 import spark.Response;
 import java.util.concurrent.locks.LockSupport;
@@ -85,7 +86,7 @@ public class AuctionHttpServer implements EgressListener
     private final MutableDirectBuffer actionBidBuffer = new ExpandableArrayBuffer();
     private final IdleStrategy idleStrategy = new BackoffIdleStrategy();
     
-    private static final AtomicLong correlationId = new AtomicLong();
+    // private static final AtomicLong correlationId = new AtomicLong();
     private final Map<Long, CompletableFuture<Map<String, Object>>> pendingResponses = new ConcurrentHashMap<>();
 
     private static final int CORRELATION_ID_OFFSET = 0;
@@ -125,13 +126,14 @@ public class AuctionHttpServer implements EgressListener
         if (future != null) {
             // System.out.printf("[MATCH] Completing future for correlationId=%d%n", correlationId);
             Map<String, Object> result = new HashMap<>();
+            result.put("corrId", correlationId);
             result.put("itemId", itemId);
             result.put("price", currentWinningPrice);
             result.put("success", success);
             future.complete(result);
             pendingResponses.remove(correlationId);
         } else {
-            System.out.printf("[WARN] No future found for correlationId=%d! Possible race or double complete.%n", correlationId);
+            System.out.printf("[WARN] %s No future found for correlationId=%d! Possible race or double complete.%n", java.time.Instant.now(), correlationId);
         }
 
         // System.out.println(
@@ -194,47 +196,47 @@ public class AuctionHttpServer implements EgressListener
         return sb.toString();
     }
 
-    private String waitForFuture(
-        CompletableFuture<Map<String, Object>> future, 
-        long corrId, 
-        Map<Long, CompletableFuture<Map<String, Object>>> responseMap, 
-        Response res
-    ) {
-        long start = System.nanoTime();
-        long maxWaitNanos = TimeUnit.SECONDS.toNanos(1);
-        long sleepNanos = TimeUnit.MILLISECONDS.toNanos(5); // tiny sleeps between polls
+    // private String waitForFuture(
+    //     CompletableFuture<Map<String, Object>> future, 
+    //     long corrId, 
+    //     Map<Long, CompletableFuture<Map<String, Object>>> responseMap, 
+    //     Response res
+    // ) {
+    //     long start = System.nanoTime();
+    //     long maxWaitNanos = TimeUnit.SECONDS.toNanos(1);
+    //     long sleepNanos = TimeUnit.MILLISECONDS.toNanos(5); // tiny sleeps between polls
 
-        while (true) {
-            if (future.isDone()) {
-                try {
-                    Map<String, Object> result = future.getNow(null);
-                    responseMap.remove(corrId);
-                    res.status(200);
-                    // System.out.printf("[RESPONSE] correlationId=%d | result=%s%n", corrId, result);
+    //     while (true) {
+    //         if (future.isDone()) {
+    //             try {
+    //                 Map<String, Object> result = future.getNow(null);
+    //                 responseMap.remove(corrId);
+    //                 res.status(200);
+    //                 // System.out.printf("[RESPONSE] correlationId=%d | result=%s%n", corrId, result);
 
-                    Map<String, Object> wrappedResult = new HashMap<>();
-                    wrappedResult.put("status", "OK");
-                    wrappedResult.putAll(result);
+    //                 Map<String, Object> wrappedResult = new HashMap<>();
+    //                 wrappedResult.put("status", "OK");
+    //                 wrappedResult.putAll(result);
 
-                    return new Gson().toJson(wrappedResult);
-                } catch (Exception e) {
-                    responseMap.remove(corrId);
-                    res.status(500);
-                    // System.err.println("    Future failed for correlationId: " + corrId + ", error: " + e.getMessage());
+    //                 return new Gson().toJson(wrappedResult);
+    //             } catch (Exception e) {
+    //                 responseMap.remove(corrId);
+    //                 res.status(500);
+    //                 // System.err.println("    Future failed for correlationId: " + corrId + ", error: " + e.getMessage());
 
-                    return new Gson().toJson(Map.of("status", "ERROR", "message", e.getMessage()));
-                }
-            }
-            if (System.nanoTime() - start > maxWaitNanos) {
-                responseMap.remove(corrId);
-                res.status(504);
-                // System.err.printf("     [TIMEOUT] correlationId=%d, pendingResponses.size()=%d%n", corrId, responseMap.size());
+    //                 return new Gson().toJson(Map.of("status", "ERROR", "message", e.getMessage()));
+    //             }
+    //         }
+    //         if (System.nanoTime() - start > maxWaitNanos) {
+    //             responseMap.remove(corrId);
+    //             res.status(504);
+    //             System.err.printf("     [TIMEOUT] %s correlationId=%d, pendingResponses.size()=%d%n", java.time.Instant.now(), corrId, responseMap.size());
 
-                return new Gson().toJson(Map.of("status", "ERROR", "message", "Timeout waiting for cluster response"));
-            }
-            LockSupport.parkNanos(sleepNanos);
-        }
-    }
+    //             return new Gson().toJson(Map.of("status", "ERROR", "message", "Timeout waiting for cluster response"));
+    //         }
+    //         LockSupport.parkNanos(sleepNanos);
+    //     }
+    // }
 
     // private synchronized void reconnectCluster()
     // {
@@ -366,18 +368,20 @@ public class AuctionHttpServer implements EgressListener
             res.type("application/json");
             res.header("Content-Type", "application/json");
 
+            final String corrIdStr = req.queryParams("corrId");
             final String itemIdStr = req.queryParams("itemId");
             final String priceStr = req.queryParams("price");
 
-            if (itemIdStr == null || priceStr == null)
+            if (corrIdStr == null || itemIdStr == null || priceStr == null)
             {
                 res.status(400);
-                return "{\"error\": \"Missing 'itemId' or 'price' parameter\"}";
+                return "{\"error\": \"Missing 'itemId' or 'price' or 'corrId' parameter\"}";
             }
 
-            final long iid, price;
+            final long iid, price, cid;
             try
             {
+                cid = Long.parseLong(corrIdStr);
                 iid = Long.parseLong(itemIdStr);
                 price = Long.parseLong(priceStr);
             } catch (NumberFormatException ex)
@@ -386,19 +390,19 @@ public class AuctionHttpServer implements EgressListener
                 return "{\"error\": \"Invalid 'itemId' or 'price' format\"}";
             }
 
-            final long corrId = correlationId.incrementAndGet(); 
+            // final long corrId = correlationId.incrementAndGet(); 
             final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
             pendingResponses.put(corrId, resultFuture);
 
             final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-            buffer.putLong(CORRELATION_ID_OFFSET, corrId);
+            buffer.putLong(CORRELATION_ID_OFFSET, cid);
             buffer.putLong(ITEM_ID_OFFSET, iid);
             buffer.putLong(PRICE_OFFSET, price);
             final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
 
             offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
-
-            return waitForFuture(resultFuture, corrId, pendingResponses, res);           
+            return "{status: \"ACK\"}";
+            // return waitForFuture(resultFuture, corrId, pendingResponses, res);  
         });
 
         get("/item", (req, res) -> {
@@ -412,12 +416,13 @@ public class AuctionHttpServer implements EgressListener
             if (itemIdStr == null)
             {
                 res.status(400);
-                return "{\"error\": \"Missing 'itemId' parameter\"}";
+                return "{\"error\": \"Missing 'itemId' or 'corrId' parameter\"}";
             }
 
-            final long itemId;
+            final long itemId, corrId;
             try
             {
+                corrId = Long.parseLong(corrIdStr);
                 itemId = Long.parseLong(itemIdStr);
             }
             catch (NumberFormatException ex)
@@ -426,7 +431,7 @@ public class AuctionHttpServer implements EgressListener
                 return "{\"error\": \"Invalid 'itemId' format\"}";
             }
 
-            final long corrId = correlationId.incrementAndGet();
+            // final long corrId = correlationId.incrementAndGet();
             final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
             pendingResponses.put(corrId, resultFuture);
 
@@ -439,6 +444,7 @@ public class AuctionHttpServer implements EgressListener
 
             offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
 
+            return "{status: \"ACK\"}";
             // Wait for the response (same mechanism as bid)
             return waitForFuture(resultFuture, corrId, pendingResponses, res);
         });
