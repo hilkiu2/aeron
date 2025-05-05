@@ -81,12 +81,13 @@ public class AuctionHttpServer implements EgressListener
 // end::client[]
 {
     private AeronCluster aeronCluster;
+    private final long[] auction = new long[10];
 
     private final MutableDirectBuffer actionBidBuffer = new ExpandableArrayBuffer();
     private final IdleStrategy idleStrategy = new BackoffIdleStrategy();
     
     private static final AtomicLong correlationId = new AtomicLong();
-    private final Map<Long, CompletableFuture<Map<String, Object>>> pendingResponses = new ConcurrentHashMap<>();
+    // private final Map<Long, CompletableFuture<Map<String, Object>>> pendingResponses = new ConcurrentHashMap<>();
 
     private static final int CORRELATION_ID_OFFSET = 0;
     private static final int ITEM_ID_OFFSET = CORRELATION_ID_OFFSET + Long.BYTES;
@@ -121,18 +122,20 @@ public class AuctionHttpServer implements EgressListener
         final long currentWinningPrice = buffer.getLong(offset + PRICE_OFFSET);
         final boolean success = 0 != buffer.getByte(offset + BID_SUCCEEDED_OFFSET);
 
-        CompletableFuture<Map<String, Object>> future = pendingResponses.get(correlationId);
-        if (future != null) {
-            // System.out.printf("[MATCH] Completing future for correlationId=%d%n", correlationId);
-            Map<String, Object> result = new HashMap<>();
-            result.put("itemId", itemId);
-            result.put("price", currentWinningPrice);
-            result.put("success", success);
-            future.complete(result);
-            pendingResponses.remove(correlationId);
-        } else {
-            System.out.printf("[WARN] No future found for correlationId=%d! Possible race or double complete.%n", correlationId);
-        }
+        auction[(int) itemId] = currentWinningPrice;
+
+        // CompletableFuture<Map<String, Object>> future = pendingResponses.get(correlationId);
+        // if (future != null) {
+        //     // System.out.printf("[MATCH] Completing future for correlationId=%d%n", correlationId);
+        //     Map<String, Object> result = new HashMap<>();
+        //     result.put("itemId", itemId);
+        //     result.put("price", currentWinningPrice);
+        //     result.put("success", success);
+        //     future.complete(result);
+        //     pendingResponses.remove(correlationId);
+        // } else {
+        //     System.out.printf("[WARN] No future found for correlationId=%d! Possible race or double complete.%n", correlationId);
+        // }
 
         // System.out.println(
         //     "OnMessage: { Cluster Session Id: " + clusterSessionId + ", Correlation Id: " + correlationId +
@@ -387,8 +390,8 @@ public class AuctionHttpServer implements EgressListener
             }
 
             final long corrId = correlationId.incrementAndGet(); 
-            final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
-            pendingResponses.put(corrId, resultFuture);
+            // final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
+            // pendingResponses.put(corrId, resultFuture);
 
             final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
             buffer.putLong(CORRELATION_ID_OFFSET, corrId);
@@ -397,8 +400,14 @@ public class AuctionHttpServer implements EgressListener
             final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
 
             offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
+            Map<String, Object> result = new HashMap<>();
+            result.put("status", "OK");
+            result.put("itemId", iid);
+            result.put("price", price);
+            result.put("success", true);
+            return new Gson().toJson(result);
 
-            return waitForFuture(resultFuture, corrId, pendingResponses, res);           
+            // return waitForFuture(resultFuture, corrId, pendingResponses, res);           
         });
 
         get("/item", (req, res) -> {
@@ -426,21 +435,27 @@ public class AuctionHttpServer implements EgressListener
                 return "{\"error\": \"Invalid 'itemId' format\"}";
             }
 
-            final long corrId = correlationId.incrementAndGet();
-            final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
-            pendingResponses.put(corrId, resultFuture);
+            // final long corrId = correlationId.incrementAndGet();
+            // final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
+            // pendingResponses.put(corrId, resultFuture);
 
-            final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-            buffer.putLong(CORRELATION_ID_OFFSET, corrId);
-            buffer.putLong(ITEM_ID_OFFSET, itemId);
-            buffer.putLong(PRICE_OFFSET, -1); // Special -1 to indicate "read"
+            // final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+            // buffer.putLong(CORRELATION_ID_OFFSET, corrId);
+            // buffer.putLong(ITEM_ID_OFFSET, itemId);
+            // buffer.putLong(PRICE_OFFSET, -1); // Special -1 to indicate "read"
 
-            final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
+            // final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
+            Map<String, Object> result = new HashMap<>();
+            result.put("status", "OK");
+            result.put("itemId", itemId);
+            result.put("price", auction[(int) itemId]);
+            result.put("success", true);
+            return new Gson().toJson(result);
 
-            offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
+            // offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
 
             // Wait for the response (same mechanism as bid)
-            return waitForFuture(resultFuture, corrId, pendingResponses, res);
+            // return waitForFuture(resultFuture, corrId, pendingResponses, res);
         });
 
         get("/health", (req, res) -> 

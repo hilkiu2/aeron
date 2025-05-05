@@ -244,9 +244,9 @@ public class BasicAuctionClusteredService implements ClusteredService
             final int index = (int) itemId;
             final long currentPrice = bestPrices[index];
 
-            if (price <= currentPrice) {
-                return false;
-            }
+            // if (price <= currentPrice) {
+            //     return false;
+            // }
 
             bestPrices[index] = price;
             return true;
