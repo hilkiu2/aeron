@@ -201,7 +201,7 @@ public class AuctionHttpServer implements EgressListener
         Response res
     ) {
         long start = System.nanoTime();
-        long maxWaitNanos = TimeUnit.SECONDS.toNanos(20);
+        long maxWaitNanos = TimeUnit.SECONDS.toNanos(1);
         long sleepNanos = TimeUnit.MILLISECONDS.toNanos(5); // tiny sleeps between polls
 
         while (true) {
