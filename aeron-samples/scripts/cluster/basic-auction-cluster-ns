@@ -30,8 +30,6 @@ function startNode() {
     ${JAVA_HOME}/bin/java \
         -cp ../../../aeron-all/build/libs/aeron-all-${VERSION}.jar \
         -javaagent:../../../aeron-agent/build/libs/aeron-agent-${VERSION}.jar \
-        -XX:+UseBiasedLocking \
-        -XX:BiasedLockingStartupDelay=0 \
         -XX:+UnlockExperimentalVMOptions \
         -XX:+TrustFinalNonStaticFields \
         -XX:+UnlockDiagnosticVMOptions \
@@ -46,12 +44,14 @@ function startNode() {
         io.aeron.samples.cluster.tutorial.BasicAuctionClusteredServiceNode > logs/cluster-${1}.log" &
 }
 
+# -Daeron.cluster.ingress.channel="aeron:udp?endpoint=192.168.42.1${1}:9${1}02|interface=192.168.42.1${1}" \
+
 function startAll() {
   startNode 0
   startNode 1
   startNode 2
 
-  tail -n 100 -F logs/cluster-*.log
+  # tail -n 100 -F logs/cluster-*.log
 }
 # end::start_jvm[]
 

@@ -352,7 +352,7 @@ public class AuctionHttpServer implements EgressListener
     }
 
     public void startHttpServer() {
-        ipAddress("0.0.0.0");
+        // ipAddress("0.0.0.0");
         port(8081);
 
         post("/bid", (req, res) -> {
@@ -464,7 +464,7 @@ public class AuctionHttpServer implements EgressListener
                 new AeronCluster.Context()
                     .egressListener(this)
                     // .egressChannel("aeron:udp?endpoint=localhost:0")
-                    .egressChannel("aeron:udp?endpoint=10.200.1.1:0")
+                    .egressChannel("aeron:udp?endpoint=10.42.0.1:0")
                     .aeronDirectoryName(mediaDriver.aeronDirectoryName())
                     .ingressChannel("aeron:udp")
                     .ingressEndpoints(ingressEndpoints)

@@ -133,6 +133,10 @@ public class BasicAuctionClusteredServiceNode
             "aeron.cluster.tutorial.hostnames", "localhost,localhost,localhost").split(",");            // <2>
         final String hostname = hostnames[nodeId];
 
+        System.out.println("servicenode/hostnames: " + Arrays.asList(hostnames));
+        System.out.println("servicenode/hostname: " + hostname);
+        System.out.println("servicenode/nodeId: " + nodeId);
+
         final File baseDir = new File(System.getProperty("user.dir"), "node" + nodeId);                 // <3>
         final String aeronDirName = CommonContext.getAeronDirectoryName() + "-" + nodeId + "-driver";
 
