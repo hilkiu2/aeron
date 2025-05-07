@@ -30,6 +30,7 @@ import java.nio.ByteOrder;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import io.aeron.CommonContext;
 
@@ -40,6 +41,7 @@ import java.time.format.DateTimeFormatter;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.ArrayList;
 import java.net.URLDecoder;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -70,6 +72,8 @@ import spark.Response;
 import java.util.concurrent.locks.LockSupport;
 import io.aeron.Publication;
 
+import java.util.concurrent.locks.*;
+import java.util.concurrent.*;
 import static io.aeron.samples.cluster.tutorial.BasicAuctionClusteredService.*;
 import static io.aeron.samples.cluster.tutorial.BasicAuctionClusteredServiceNode.calculatePort;
 
@@ -80,7 +84,67 @@ import static io.aeron.samples.cluster.tutorial.BasicAuctionClusteredServiceNode
 public class AuctionHttpServer implements EgressListener
 // end::client[]
 {
-    private AeronCluster aeronCluster;
+    private String ingressEndpoints;
+    private final AtomicInteger threadCount = new AtomicInteger(0);
+    private final Lock aeronInitLock = new ReentrantLock();
+    // private AeronCluster aeronCluster;
+    private final ThreadLocal<MediaDriver> mediaDriverStore = ThreadLocal.withInitial(() -> null);
+
+    private final ThreadLocal<AeronCluster> aeronCluster = ThreadLocal.withInitial(() -> 
+        {
+            try {
+                aeronInitLock.lock();
+                MediaDriver mediaDriver = MediaDriver.launchEmbedded(new MediaDriver.Context()
+                    .threadingMode(ThreadingMode.SHARED)
+                    .dirDeleteOnStart(true)
+                    .dirDeleteOnShutdown(true));
+
+                mediaDriverStore.set(mediaDriver);
+
+                AeronCluster.Context aeronClusterContext = new AeronCluster.Context()
+                            .egressListener(this)
+                            // .egressChannel("aeron:udp?endpoint=127.0.0.1:0")
+                            .egressChannel("aeron:udp?endpoint=10.42.0.1:0")
+                            .aeronDirectoryName(mediaDriver.aeronDirectoryName())
+                            .ingressChannel("aeron:udp")
+                            .ingressEndpoints(this.ingressEndpoints);
+
+                AeronCluster newCluster = AeronCluster.connect(aeronClusterContext);
+
+                new Thread(() -> {
+                    try {
+                        final long keepAliveIntervalNanos = TimeUnit.SECONDS.toNanos(1); // send every 1 second
+                        long lastKeepAliveTime = System.nanoTime();
+
+                        while (!Thread.currentThread().isInterrupted()) {
+                            int fragments = newCluster.pollEgress();
+
+                            long now = System.nanoTime();
+                            if (now - lastKeepAliveTime >= keepAliveIntervalNanos) {
+                                newCluster.sendKeepAlive();
+                                lastKeepAliveTime = now;
+                            }
+
+                            if (fragments == 0) {
+                                LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(5));
+                            } 
+                        }
+                    } catch (Exception e) {
+                        System.out.println("Keep Alive Thread Interupted:");
+                        e.printStackTrace();
+                    }
+                }, "Aeron-KeepAlive-Thread-" + threadCount.getAndIncrement()).start();
+                // System.out.println("Aeron cluster created.");
+                return newCluster;
+            } catch (Exception e) {
+                System.err.println("Failed to connect to Aeron cluster:");
+                e.printStackTrace();
+                return null;
+            } finally {
+                aeronInitLock.unlock();
+            }
+        }
+    );
 
     private final MutableDirectBuffer actionBidBuffer = new ExpandableArrayBuffer();
     private final IdleStrategy idleStrategy = new BackoffIdleStrategy();
@@ -201,7 +265,7 @@ public class AuctionHttpServer implements EgressListener
         Response res
     ) {
         long start = System.nanoTime();
-        long maxWaitNanos = TimeUnit.SECONDS.toNanos(1);
+        long maxWaitNanos = TimeUnit.SECONDS.toNanos(15); // client timeout 
         long sleepNanos = TimeUnit.MILLISECONDS.toNanos(5); // tiny sleeps between polls
 
         while (true) {
@@ -228,7 +292,7 @@ public class AuctionHttpServer implements EgressListener
             if (System.nanoTime() - start > maxWaitNanos) {
                 responseMap.remove(corrId);
                 res.status(504);
-                // System.err.printf("     [TIMEOUT] correlationId=%d, pendingResponses.size()=%d%n", corrId, responseMap.size());
+                System.err.printf("     [TIMEOUT] correlationId=%d, pendingResponses.size()=%d%n", corrId, responseMap.size());
 
                 return new Gson().toJson(Map.of("status", "ERROR", "message", "Timeout waiting for cluster response"));
             }
@@ -281,14 +345,28 @@ public class AuctionHttpServer implements EgressListener
     //     }
     // }
 
-    private boolean offerWithRetries(DirectBuffer buffer, int length, long corrId, Response res)
+    private long offerWithRetries(DirectBuffer buffer, int length, long corrId, Response res)
     {
+        int retries = 0;
+        long clusterResponse = 0;
+        List<Long> seenResponses = new ArrayList<>();
         idleStrategy.reset();
-        while (aeronCluster.offer(buffer, 0, length) < 0)
+        while ((clusterResponse = aeronCluster.get().offer(buffer, 0, length)) < 0)
         {
-            idleStrategy.idle(aeronCluster.pollEgress());
+            if (!seenResponses.contains(clusterResponse)) {
+                seenResponses.add(clusterResponse);
+            }
+            if (++retries >= 10000) {
+                System.out.println("CorrId: " + corrId + "; num retries: " + retries + "; seen responses: " + seenResponses);
+                return clusterResponse;
+            }
+            idleStrategy.idle(aeronCluster.get().pollEgress());
         }
-        return true;
+        if (seenResponses.size() != 0) {
+           System.out.println("CorrId: " + corrId + "; num retries: " + retries + "; seen responses: " + seenResponses);
+        }
+        // if count != 0 System.out.println("%s CorrID: ")
+        return 0L;
 
         // int attempts = 0;
         // long result;
@@ -355,10 +433,16 @@ public class AuctionHttpServer implements EgressListener
         // ipAddress("0.0.0.0");
         port(8081);
 
+        threadPool(
+            10,      // max
+            10,       // min
+            300_000    // idle timeout (300 s)
+        );
+
         post("/bid", (req, res) -> {
             // System.out.printf("...post/bid itemId=%s, price=%s%n", req.queryParams("itemId"), req.queryParams("price"));
 
-            if (aeronCluster == null) {
+            if (aeronCluster.get() == null) {
                 System.err.println("Aeron not connected. Aborting HTTP server.");
                 System.exit(1);
             }
@@ -396,7 +480,11 @@ public class AuctionHttpServer implements EgressListener
             buffer.putLong(PRICE_OFFSET, price);
             final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
 
-            offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
+            final long clusterResponse = offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
+            if (clusterResponse < 0) {
+                res.status(500);
+                return new Gson().toJson(Map.of("status", "ERROR", "message", "Issue sending to aeron client: " + clusterResponse));
+            }
 
             return waitForFuture(resultFuture, corrId, pendingResponses, res);           
         });
@@ -437,7 +525,11 @@ public class AuctionHttpServer implements EgressListener
 
             final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
 
-            offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
+            final long clusterResponse = offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
+            if (clusterResponse < 0) {
+                res.status(500);
+                return new Gson().toJson(Map.of("status", "ERROR", "message", "Issue sending to aeron client: " + clusterResponse));
+            }
 
             // Wait for the response (same mechanism as bid)
             return waitForFuture(resultFuture, corrId, pendingResponses, res);
@@ -448,53 +540,27 @@ public class AuctionHttpServer implements EgressListener
             res.type("application/json");
             res.header("Content-Type", "application/json");
 
-            return aeronCluster != null ? "{\"status\": \"OK\"}" : "{\"status\": \"ERROR\"}";
+            return aeronCluster.get() != null ? "{\"status\": \"OK\"}" : "{\"status\": \"ERROR\"}";
+        });
+
+        exception(Exception.class, (e, req, res) -> 
+        {
+            AeronCluster cluster = aeronCluster.get();
+            MediaDriver mediaDriver = mediaDriverStore.get();
+            if (cluster != null) {
+                cluster.close();
+            }
+            if (mediaDriver != null) {
+                mediaDriver.close();
+            }
+            aeronCluster.remove();
+            mediaDriverStore.remove();
+            // System.out.println("    Aeron cluster closed.");
         });
     }
 
     public void connect(String ingressEndpoints) {
-        try {
-            MediaDriver mediaDriver = MediaDriver.launchEmbedded(new MediaDriver.Context()
-                .threadingMode(ThreadingMode.SHARED)
-                .dirDeleteOnStart(true)
-                .dirDeleteOnShutdown(true));
-
-            System.out.println("Ingress endpoints: " + ingressEndpoints);
-            this.aeronCluster = AeronCluster.connect(
-                new AeronCluster.Context()
-                    .egressListener(this)
-                    // .egressChannel("aeron:udp?endpoint=localhost:0")
-                    .egressChannel("aeron:udp?endpoint=10.42.0.1:0")
-                    .aeronDirectoryName(mediaDriver.aeronDirectoryName())
-                    .ingressChannel("aeron:udp")
-                    .ingressEndpoints(ingressEndpoints)
-                    .isIngressExclusive(false)
-            );
-
-            // Launch keep-alive thread
-            new Thread(() -> {
-                final long keepAliveIntervalNanos = TimeUnit.SECONDS.toNanos(1); // send every 1 second
-                long lastKeepAliveTime = System.nanoTime();
-
-                while (!Thread.currentThread().isInterrupted()) {
-                    int fragments = aeronCluster.pollEgress();
-
-                    long now = System.nanoTime();
-                    if (now - lastKeepAliveTime >= keepAliveIntervalNanos) {
-                        aeronCluster.sendKeepAlive();
-                        lastKeepAliveTime = now;
-                    }
-
-                    if (fragments == 0) {
-                        LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(5));
-                    } 
-                }
-            }, "Aeron-KeepAlive-Thread").start();
-
-        } catch (Exception e) {
-            System.err.println("Failed to connect to Aeron cluster:");
-            e.printStackTrace();
-        }
+        this.ingressEndpoints = ingressEndpoints;
     }
 
     /**

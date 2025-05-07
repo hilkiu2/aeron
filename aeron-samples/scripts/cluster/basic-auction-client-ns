@@ -33,6 +33,7 @@ function startNode() {
         -Daeron.cluster.tutorial.itemId="${1}" \
         -Daeron.cluster.tutorial.numOfBids="${2}" \
         -Daeron.cluster.tutorial.bidIntervalMs="${3}" \
+        # -XX:+PrintGC -Xlog:gc*:file=gc.log:time,uptime,level,tags \
         -Daeron.cluster.tutorial.hostnames=10.42.0.10,10.42.0.11,10.42.0.12 \
         ${JVM_OPTS:-} ${ADD_OPENS} \
         io.aeron.samples.cluster.tutorial.BasicAuctionClusterClient
