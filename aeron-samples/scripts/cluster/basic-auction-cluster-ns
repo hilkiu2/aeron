@@ -40,11 +40,15 @@ function startNode() {
         -Daeron.event.cluster.log.disable=CANVASS_POSITION,APPEND_POSITION,COMMIT_POSITION \
         -Daeron.cluster.tutorial.hostnames=10.42.0.10,10.42.0.11,10.42.0.12 \
         -Daeron.cluster.tutorial.nodeId=${1} \
+        -Daeron.cluster.max.sessions=200 \
         ${JVM_OPTS:-} ${ADD_OPENS} \
         io.aeron.samples.cluster.tutorial.BasicAuctionClusteredServiceNode > logs/cluster-${1}.log" &
 }
 
-# -Daeron.cluster.ingress.channel="aeron:udp?endpoint=192.168.42.1${1}:9${1}02|interface=192.168.42.1${1}" \
+# -Daeron.cluster.max.sessions=20 \
+# -Daeron.event.log=all \
+# -Daeron.event.log.disable=FRAME_IN,FRAME_OUT \
+# -Daeron.event.logger=io.aeron.logbuffer.EventLogReader \
 
 function startAll() {
   startNode 0

@@ -41,6 +41,7 @@ import java.time.format.DateTimeFormatter;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.ArrayList;
 import java.net.URLDecoder;
 import java.net.InetAddress;
@@ -87,7 +88,6 @@ public class AuctionHttpServer implements EgressListener
     private String ingressEndpoints;
     private final AtomicInteger threadCount = new AtomicInteger(0);
     private final Lock aeronInitLock = new ReentrantLock();
-    // private AeronCluster aeronCluster;
     private final ThreadLocal<MediaDriver> mediaDriverStore = ThreadLocal.withInitial(() -> null);
 
     private final ThreadLocal<AeronCluster> aeronCluster = ThreadLocal.withInitial(() -> 
@@ -134,7 +134,7 @@ public class AuctionHttpServer implements EgressListener
                         e.printStackTrace();
                     }
                 }, "Aeron-KeepAlive-Thread-" + threadCount.getAndIncrement()).start();
-                // System.out.println("Aeron cluster created.");
+                System.out.println("Aeron cluster created.");
                 return newCluster;
             } catch (Exception e) {
                 System.err.println("Failed to connect to Aeron cluster:");
@@ -151,6 +151,7 @@ public class AuctionHttpServer implements EgressListener
     
     private static final AtomicLong correlationId = new AtomicLong();
     private final Map<Long, CompletableFuture<Map<String, Object>>> pendingResponses = new ConcurrentHashMap<>();
+    private final Set<Long> allCorrelationIds = ConcurrentHashMap.newKeySet();
 
     private static final int CORRELATION_ID_OFFSET = 0;
     private static final int ITEM_ID_OFFSET = CORRELATION_ID_OFFSET + Long.BYTES;
@@ -195,7 +196,12 @@ public class AuctionHttpServer implements EgressListener
             future.complete(result);
             pendingResponses.remove(correlationId);
         } else {
-            System.out.printf("[WARN] No future found for correlationId=%d! Possible race or double complete.%n", correlationId);
+            if (allCorrelationIds.contains(correlationId)) {
+                System.out.printf("[WARN] Correlation ID %d was already completed. Possible double complete.%n", correlationId);
+            } else {
+                System.out.printf("[WARN] Correlation ID %d was never registered! Message possibly out of band or stale.%n", correlationId);
+            }
+            //System.out.printf("[WARN] No future found for correlationId=%d! Possible race or double complete.%n", correlationId);
         }
 
         // System.out.println(
@@ -232,7 +238,19 @@ public class AuctionHttpServer implements EgressListener
     {
         System.out.println(
             "onNewLeader: { Cluster Session Id: " + clusterSessionId +
-            ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId + "}");
+            ", Leadership Term Id: " + leadershipTermId + ", Leadership Member Id: " + leaderMemberId + ", num pendingResponses: " + pendingResponses.size() + "}");
+
+        // List<Long> keys = new ArrayList<>(pendingResponses.keySet());
+        // for (Long corrId : keys) {
+        //     CompletableFuture<Map<String, Object>> future = pendingResponses.get(corrId);
+        //     if (future != null) {
+        //         future.complete(Map.of(
+        //             "status", "OK",
+        //             "message", "NewLeader, cannot guarantee request was sent to cluster"
+        //         ));
+        //         System.err.printf("     [NEWLEADER- REQ DROPPED] correlationId=%d, pendingResponses.size()=%d%n", corrId, pendingResponses.size());
+        //     }
+        // }
     }
     // end::response[]
 
@@ -265,7 +283,7 @@ public class AuctionHttpServer implements EgressListener
         Response res
     ) {
         long start = System.nanoTime();
-        long maxWaitNanos = TimeUnit.SECONDS.toNanos(15); // client timeout 
+        long maxWaitNanos = TimeUnit.SECONDS.toNanos(15); // client timeout  
         long sleepNanos = TimeUnit.MILLISECONDS.toNanos(5); // tiny sleeps between polls
 
         while (true) {
@@ -300,51 +318,6 @@ public class AuctionHttpServer implements EgressListener
         }
     }
 
-    // private synchronized void reconnectCluster()
-    // {
-    //     try
-    //     {
-    //         if (isReconnecting.get()) {
-    //             return;
-    //         }
-
-    //         isReconnecting.set(true);
-
-    //         System.out.println("[RECONNECT] Closing old AeronCluster connection...");
-    //         if (aeronCluster != null)
-    //         {
-    //             aeronCluster.close();
-    //         }
-    //     }
-    //     catch (Exception e)
-    //     {
-    //         System.err.println("[RECONNECT] Error closing old AeronCluster: " + e.getMessage());
-    //     }
-
-    //     try
-    //     {
-    //         System.out.println("[RECONNECT] Creating new AeronCluster connection...");
-    //         this.aeronCluster = AeronCluster.connect(
-    //             new AeronCluster.Context()
-    //                 .egressListener(this)
-    //                 .egressChannel("aeron:udp?endpoint=localhost:0")
-    //                 .aeronDirectoryName(this.aeronCluster.context().aeronDirectoryName())
-    //                 .ingressChannel("aeron:udp")
-    //                 .ingressEndpoints(this.aeronCluster.context().ingressEndpoints())
-    //         );
-    //         System.out.println("[RECONNECT] New AeronCluster connection established!");
-    //     }
-    //     catch (Exception e)
-    //     {
-    //         System.err.println("[RECONNECT] Failed to reconnect to Aeron cluster: " + e.getMessage());
-    //         e.printStackTrace();
-    //     }
-    //     finally
-    //     {
-    //         isReconnecting.set(false);
-    //     }
-    // }
-
     private long offerWithRetries(DirectBuffer buffer, int length, long corrId, Response res)
     {
         int retries = 0;
@@ -353,80 +326,25 @@ public class AuctionHttpServer implements EgressListener
         idleStrategy.reset();
         while ((clusterResponse = aeronCluster.get().offer(buffer, 0, length)) < 0)
         {
+            System.out.println("        RETRYING: " + clusterResponse);
             if (!seenResponses.contains(clusterResponse)) {
                 seenResponses.add(clusterResponse);
             }
             if (++retries >= 10000) {
                 System.out.println("CorrId: " + corrId + "; num retries: " + retries + "; seen responses: " + seenResponses);
+                
+                if (clusterResponse == -4L) // CLOSED
+                {
+                    throw new RuntimeException("Client CLOSED");
+                }
                 return clusterResponse;
             }
             idleStrategy.idle(aeronCluster.get().pollEgress());
         }
-        if (seenResponses.size() != 0) {
+        if (retries > 0) {
            System.out.println("CorrId: " + corrId + "; num retries: " + retries + "; seen responses: " + seenResponses);
         }
-        // if count != 0 System.out.println("%s CorrID: ")
         return 0L;
-
-        // int attempts = 0;
-        // long result;
-
-        // // System.out.printf("Sending request: correlationId=%d%n", corrId);
-        // while (true)
-        // {
-        //     if (isReconnecting.get()) {
-        //         // Wait for reconnect to complete
-        //         for (int i = 0; i < 100; i++) {
-        //             if (!isReconnecting.get()) break;
-        //             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5)); // wait 5ms
-        //         }
-        //     }
-            
-        //     result = aeronCluster.offer(buffer, 0, length);
-
-        //     if (result > 0)
-        //     {
-        //         // System.out.printf("[OFFER SUCCESS] correlationId=%d, result=%d after %d attempts%n", corrId, result, attempts);
-        //         return true;
-        //     }
-
-        //     if (result == Publication.NOT_CONNECTED)
-        //     {
-        //         System.err.printf("[OFFER FAIL] correlationId=%d: NOT_CONNECTED (-1)%n", corrId);
-        //     }
-        //     else if (result == Publication.CLOSED)
-        //     {
-        //         System.err.printf("[OFFER FAIL] correlationId=%d: CLOSED (-2). Reconnecting (not actually)...%n", corrId);
-        //         // reconnectCluster();
-        //         pendingResponses.remove(corrId);
-        //         res.status(500);
-        //         return false;
-        //     }
-        //     else if (result == Publication.MAX_POSITION_EXCEEDED)
-        //     {
-        //         System.err.printf("[OFFER FAIL] correlationId=%d: MAX_POSITION_EXCEEDED (-3)%n", corrId);
-        //     }
-        //     else if (result == 0)
-        //     {
-        //         // Backpressure: OK to retry
-        //         if (attempts % 100 == 0) {
-        //             System.err.printf("[OFFER FAIL] correlationId=%d: BACKPRESSURE (0) after %d attempts%n", corrId, attempts);
-        //         }
-        //     }
-        //     else
-        //     {
-        //         System.err.printf("[OFFER FAIL] correlationId=%d: UNKNOWN ERROR (result=%d)%n", corrId, result);
-        //     }
-
-        //     if (++attempts > 10000)
-        //     {
-        //         // System.err.printf("[OFFER FAILED] correlationId=%d after 10000 attempts%n", corrId);
-        //         pendingResponses.remove(corrId);
-        //         res.status(500);
-        //         return false;
-        //     }
-        //     LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(50));
-        // }
     }
 
     public void startHttpServer() {
@@ -434,14 +352,12 @@ public class AuctionHttpServer implements EgressListener
         port(8081);
 
         threadPool(
-            10,      // max
-            10,       // min
+            100,      // max
+            100,       // min
             300_000    // idle timeout (300 s)
         );
 
         post("/bid", (req, res) -> {
-            // System.out.printf("...post/bid itemId=%s, price=%s%n", req.queryParams("itemId"), req.queryParams("price"));
-
             if (aeronCluster.get() == null) {
                 System.err.println("Aeron not connected. Aborting HTTP server.");
                 System.exit(1);
@@ -472,6 +388,7 @@ public class AuctionHttpServer implements EgressListener
 
             final long corrId = correlationId.incrementAndGet(); 
             final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
+            allCorrelationIds.add(corrId);
             pendingResponses.put(corrId, resultFuture);
 
             final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
@@ -480,7 +397,13 @@ public class AuctionHttpServer implements EgressListener
             buffer.putLong(PRICE_OFFSET, price);
             final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
 
+            final long startTime = System.nanoTime();
             final long clusterResponse = offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
+            final long durationNanos = System.nanoTime() - startTime;
+            if (durationNanos > 10_000_000_000L) { // 10 sec
+                System.out.println("CorrId: " + corrId + " took " + (durationNanos / 1_000_000) + " ms");
+            }
+
             if (clusterResponse < 0) {
                 res.status(500);
                 return new Gson().toJson(Map.of("status", "ERROR", "message", "Issue sending to aeron client: " + clusterResponse));
@@ -490,8 +413,6 @@ public class AuctionHttpServer implements EgressListener
         });
 
         get("/item", (req, res) -> {
-            // System.out.printf("...get/item itemId=%s%n", req.queryParams("itemId"));
-
             res.type("application/json");
             res.header("Content-Type", "application/json");
 
@@ -516,6 +437,7 @@ public class AuctionHttpServer implements EgressListener
 
             final long corrId = correlationId.incrementAndGet();
             final CompletableFuture<Map<String, Object>> resultFuture = new CompletableFuture<>();
+            allCorrelationIds.add(corrId);
             pendingResponses.put(corrId, resultFuture);
 
             final ByteBuffer buffer = ByteBuffer.allocate(PRICE_OFFSET + Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
@@ -525,13 +447,18 @@ public class AuctionHttpServer implements EgressListener
 
             final DirectBuffer aeronBuffer = new UnsafeBuffer(buffer.array());
 
+            final long startTime = System.nanoTime();
             final long clusterResponse = offerWithRetries(aeronBuffer, buffer.capacity(), corrId, res);
+            final long durationNanos = System.nanoTime() - startTime;
+            if (durationNanos > 10_000_000_000L) { // 10 sec
+                System.out.println("CorrId: " + corrId + " took " + (durationNanos / 1_000_000) + " ms");
+            }
+
             if (clusterResponse < 0) {
                 res.status(500);
                 return new Gson().toJson(Map.of("status", "ERROR", "message", "Issue sending to aeron client: " + clusterResponse));
             }
 
-            // Wait for the response (same mechanism as bid)
             return waitForFuture(resultFuture, corrId, pendingResponses, res);
         });
 
@@ -555,7 +482,7 @@ public class AuctionHttpServer implements EgressListener
             }
             aeronCluster.remove();
             mediaDriverStore.remove();
-            // System.out.println("    Aeron cluster closed.");
+            System.out.println("    [Exception] Aeron cluster closed.");
         });
     }
 
